@@ -106,3 +106,21 @@ def test_never_enters_returns_empty_list():
     ])
     trades = simulate_trades(weekly, entry_level=32.0, exit_level=80.0)
     assert trades == []
+
+
+def test_skips_nan_k_or_d_rows():
+    weekly = _weekly([
+        ("2025-12-05", 90, float("nan"), float("nan")),  # NaN k/d — rolling window not full yet
+        ("2025-12-12", 95, float("nan"), float("nan")),  # NaN k/d — skipped
+        ("2026-01-02", 100, 20, 25),
+        ("2026-01-09", 105, 35, 28),  # entry: K crosses above 32
+        ("2026-01-16", 110, 50, 40),  # holding
+        ("2026-01-23", 115, 60, 55),  # holding
+        ("2026-01-30", 108, 58, 62),  # exit: K<D and K<80
+    ])
+    trades = simulate_trades(weekly, entry_level=32.0, exit_level=80.0)
+    assert len(trades) == 1
+    t = trades[0]
+    assert t["entry_date"] == pd.Timestamp("2026-01-09")
+    assert t["exit_date"] == pd.Timestamp("2026-01-30")
+    assert t["holding_weeks"] == 3
