@@ -81,6 +81,7 @@ def fetch_ohlc_bulk(
     chunk_size: int = FETCH_CHUNK_SIZE,
     retries: int = FETCH_RETRIES,
     retry_delay: float = FETCH_RETRY_DELAY,
+    period: str = HISTORY_PERIOD,
 ) -> dict[str, pd.DataFrame]:
     result = {}
     unique_symbols = list(dict.fromkeys(yf_symbols))
@@ -91,7 +92,7 @@ def fetch_ohlc_bulk(
             try:
                 downloaded = yf.download(
                     " ".join(chunk),
-                    period=HISTORY_PERIOD,
+                    period=period,
                     interval="1d",
                     group_by="ticker",
                     progress=False,
