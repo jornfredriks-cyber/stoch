@@ -23,14 +23,23 @@ Confirmed against the strategy doc:
 - **Long-only.** The strategy doc's mirror short-side rule (short near 80, cover on %K crossing back above %D) is not implemented in this phase.
 - Each ticker is simulated independently as a repeating state machine (Flat → Long → Flat → …) — multiple sequential trades per ticker over its history are expected and counted separately. No portfolio/capital simulation; each trade is an isolated % return.
 
+## Folder Structure
+
+Two new folders, scoped to the backtester only (not adopted by `screener.py`/`stoch_scan.py` in this phase, to avoid touching already-shipped, tested code):
+
+- **`INPUT/`** — where you drop a TradingView Watchlist export for the backtester to pick up.
+- **`OUTPUT/`** — where the backtester writes its trades CSV and log.
+
+Both are created automatically (with `.gitkeep`) if missing when `backtest.py` runs.
+
 ## Ticker Source
 
-New `scan_utils.find_ticker_list(folder)`:
+New `scan_utils.find_ticker_list(input_folder, fallback_folder)`:
 
-1. Look for a file matching `*Watchlist*` in the folder (plain text, comma-separated `EXCHANGE:TICKER`, e.g. `NASDAQ:AAPL,NYSE:V`) — same parsing convention as `Dashboard/data_loader.py`'s `parse_ticker_line`, including the `OSLO:` → `.OL` yfinance-symbol conversion for consistency, even though the current universe is NASDAQ/NYSE-only.
-2. If no watchlist file is found, fall back to the latest `*Screener*.csv` via the existing `find_latest_csv`.
+1. Look for a file matching `*Watchlist*` in `input_folder` (i.e. `INPUT/`) — plain text, comma-separated `EXCHANGE:TICKER`, e.g. `NASDAQ:AAPL,NYSE:V` — same parsing convention as `Dashboard/data_loader.py`'s `parse_ticker_line`, including the `OSLO:` → `.OL` yfinance-symbol conversion for consistency, even though the current universe is NASDAQ/NYSE-only.
+2. If no watchlist file is found in `INPUT/`, fall back to the latest `*Screener*.csv` in `fallback_folder` via the existing `find_latest_csv` — this stays pointed at `Stoch/` root, exactly where `screener.py` already writes it today. No need to move or copy that file anywhere for the fallback to keep working.
 
-This lets you drop a TradingView Watchlist export into `Stoch/` and have the backtester pick it up directly, without needing a fresh screener run first. `stoch_scan.py` (the live scanner) is **not** changed to use this in this phase — it keeps reading the screener CSV as it does today. The shared function is written once so wiring the live scanner to it later is a small follow-up, not a redesign.
+`backtest.py` calls this as `find_ticker_list(input_folder=INPUT_DIR, fallback_folder=folder)`. `stoch_scan.py` (the live scanner) is **not** changed to use this in this phase — it keeps reading the screener CSV from `Stoch/` root as it does today. The shared function is written once so wiring the live scanner to it later is a small follow-up, not a redesign.
 
 ## Data Range
 
@@ -42,7 +51,8 @@ Full available yfinance daily history (`period="max"`) per ticker, resampled to 
 
 ```
 scan_utils.py
-  + find_ticker_list(folder) -> list[str]      # watchlist-or-screener-CSV ticker source
+  + find_ticker_list(input_folder, fallback_folder) -> list[str]
+      # watchlist (INPUT/) with screener-CSV fallback (project root)
   ~ fetch_ohlc_bulk(..., period=HISTORY_PERIOD) # period now overridable
 
 stoch_scan.py
@@ -56,10 +66,14 @@ backtest.py                                     # new
   simulate_trades(weekly: pd.DataFrame, entry_level=32.0, exit_level=80.0) -> list[dict]
     # pure state-machine over a precomputed weekly close/k/d frame — no I/O,
     # independently unit-testable with synthetic K/D series
-  run_backtest(folder) -> writes CSV + log, prints summary
-    # orchestration: find_ticker_list -> fetch_ohlc_bulk(period="max")
+  run_backtest(folder) -> writes CSV + log to OUTPUT/, prints summary
+    # orchestration: find_ticker_list(INPUT/, fallback=folder) -> fetch_ohlc_bulk(period="max")
     #   -> compute_kd per ticker -> simulate_trades per ticker -> aggregate
+    # ensures INPUT/ and OUTPUT/ exist (creates with .gitkeep if missing)
   main()                                        # _Tee logging wrapper, same pattern as stoch_scan.py
+
+INPUT/.gitkeep                                   # new — drop a *Watchlist* export file here
+OUTPUT/.gitkeep                                  # new — Stoch_Backtest_Trades_*.csv + logs land here
 
 RUN Stoch Backtest.command                       # new launcher, same style as existing .command files
 ```
@@ -81,8 +95,10 @@ Each trade (in the output CSV and in `simulate_trades`'s return value):
 
 ## Output
 
-- `Stoch_Backtest_Trades_YYYY-MM-DD.csv` — one row per trade across all tickers
-- `stoch_backtest_log_YYYY-MM-DD.txt` — full run log (same `_Tee` pattern as `screener.py`/`stoch_scan.py`)
+Written to `OUTPUT/`:
+
+- `OUTPUT/Stoch_Backtest_Trades_YYYY-MM-DD.csv` — one row per trade across all tickers
+- `OUTPUT/stoch_backtest_log_YYYY-MM-DD.txt` — full run log (same `_Tee` pattern as `screener.py`/`stoch_scan.py`)
 - Console/log summary block: total trades, closed vs. open count, win rate (closed trades only), avg winning return %, avg losing return %, avg holding period (weeks) — framed to compare directly against the strategy doc's claimed ~70% win rate / variable win size.
 
 ## Testing

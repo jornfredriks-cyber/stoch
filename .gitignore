@@ -10,3 +10,6 @@ Stoch_Backtest_Trades_*.csv
 stoch_screener_log_*.txt
 stoch_scan_log_*.txt
 stoch_backtest_log_*.txt
+
+# Personal watchlist export — local input data, not versioned
+*Watchlist*
