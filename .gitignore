@@ -13,3 +13,4 @@ stoch_backtest_log_*.txt
 
 # Personal watchlist export — local input data, not versioned
 *Watchlist*
+[Tt]radingview*

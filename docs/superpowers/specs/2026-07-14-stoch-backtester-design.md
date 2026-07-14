@@ -36,7 +36,7 @@ Both are created automatically (with `.gitkeep`) if missing when `backtest.py` r
 
 New `scan_utils.find_ticker_list(input_folder, fallback_folder)`:
 
-1. Look for a file matching `*Watchlist*` in `input_folder` (i.e. `INPUT/`) — plain text, comma-separated `EXCHANGE:TICKER`, e.g. `NASDAQ:AAPL,NYSE:V` — same parsing convention as `Dashboard/data_loader.py`'s `parse_ticker_line`, including the `OSLO:` → `.OL` yfinance-symbol conversion for consistency, even though the current universe is NASDAQ/NYSE-only.
+1. Look for a file matching `*Watchlist*` OR TradingView's actual default export naming, `[Tt]radingview*` (confirmed in practice: `Tradingview <ListName>_<date>_<id>.txt` — it does not contain the word "Watchlist" at all), in `input_folder` — plain text, comma-separated `EXCHANGE:TICKER`, e.g. `NASDAQ:AAPL,NYSE:V` — same parsing convention as `Dashboard/data_loader.py`'s `parse_ticker_line`, including the `OSLO:` → `.OL` yfinance-symbol conversion for consistency, even though the current universe is NASDAQ/NYSE-only.
 2. If no watchlist file is found in `INPUT/`, fall back to the latest `*Screener*.csv` in `fallback_folder` via the existing `find_latest_csv` — this stays pointed at `Stoch/` root, exactly where `screener.py` already writes it today. No need to move or copy that file anywhere for the fallback to keep working.
 
 `backtest.py` calls this as `find_ticker_list(input_folder=INPUT_DIR, fallback_folder=folder)`. `stoch_scan.py` (the live scanner) is **not** changed to use this in this phase — it keeps reading the screener CSV from `Stoch/` root as it does today. The shared function is written once so wiring the live scanner to it later is a small follow-up, not a redesign.

@@ -64,11 +64,16 @@ def _parse_watchlist_line(line: str) -> list[str]:
 
 def find_ticker_list(input_folder: str, fallback_folder: str) -> list[str]:
     """
-    Looks for a *Watchlist* file (TradingView export: plain text,
-    comma-separated EXCHANGE:TICKER) in input_folder. Falls back to the
-    latest screener CSV in fallback_folder if no watchlist file exists.
+    Looks for a TradingView watchlist export file (plain text,
+    comma-separated EXCHANGE:TICKER) in input_folder — either a manually
+    renamed file with "Watchlist" in the name, or TradingView's own default
+    export naming ("Tradingview <ListName>_<date>_<id>.txt"). Falls back to
+    the latest screener CSV in fallback_folder if no watchlist file exists.
     """
-    watchlist_files = glob.glob(os.path.join(input_folder, "*Watchlist*"))
+    watchlist_files = (
+        glob.glob(os.path.join(input_folder, "*Watchlist*"))
+        + glob.glob(os.path.join(input_folder, "[Tt]radingview*"))
+    )
     if watchlist_files:
         watchlist_path = max(watchlist_files, key=os.path.getmtime)
         with open(watchlist_path) as f:

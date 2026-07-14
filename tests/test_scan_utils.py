@@ -47,6 +47,21 @@ def test_find_ticker_list_prefers_watchlist_file(tmp_path):
     assert result == ["AAPL", "V"]
 
 
+def test_find_ticker_list_matches_tradingview_default_export_name(tmp_path):
+    # TradingView's actual default export filename doesn't contain the word
+    # "Watchlist" at all -- it's "Tradingview <ListName>_<date>_<id>.txt".
+    input_dir = tmp_path / "INPUT"
+    input_dir.mkdir()
+    (input_dir / "Tradingview Stoch_SweetSpot_2026-07-14_19337.txt").write_text(
+        "NASDAQ:AAPL,NYSE:V"
+    )
+    fallback_dir = tmp_path / "fallback"
+    fallback_dir.mkdir()
+
+    result = find_ticker_list(str(input_dir), str(fallback_dir))
+    assert result == ["AAPL", "V"]
+
+
 def test_find_ticker_list_falls_back_to_screener_csv(tmp_path):
     input_dir = tmp_path / "INPUT"
     input_dir.mkdir()
