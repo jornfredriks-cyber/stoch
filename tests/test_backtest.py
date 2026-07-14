@@ -109,18 +109,23 @@ def test_never_enters_returns_empty_list():
 
 
 def test_skips_nan_k_or_d_rows():
+    # NaN row (2026-01-23) sits BETWEEN entry and exit, not before entry --
+    # this is what makes the test discriminate: if dropna were removed, the
+    # NaN row would still be walked (NaN comparisons are always False, so it
+    # triggers no entry/exit action) but it WOULD count toward holding_weeks,
+    # making the index arithmetic wrong (4 instead of 3). Verified by hand:
+    # with dropna, holding_weeks=3; without dropna, holding_weeks=4.
     weekly = _weekly([
-        ("2025-12-05", 90, float("nan"), float("nan")),  # NaN k/d — rolling window not full yet
-        ("2025-12-12", 95, float("nan"), float("nan")),  # NaN k/d — skipped
         ("2026-01-02", 100, 20, 25),
         ("2026-01-09", 105, 35, 28),  # entry: K crosses above 32
         ("2026-01-16", 110, 50, 40),  # holding
-        ("2026-01-23", 115, 60, 55),  # holding
-        ("2026-01-30", 108, 58, 62),  # exit: K<D and K<80
+        ("2026-01-23", 112, float("nan"), float("nan")),  # NaN -- must be skipped
+        ("2026-01-30", 115, 60, 55),  # holding
+        ("2026-02-06", 108, 58, 62),  # exit: K<D and K<80
     ])
     trades = simulate_trades(weekly, entry_level=32.0, exit_level=80.0)
     assert len(trades) == 1
     t = trades[0]
     assert t["entry_date"] == pd.Timestamp("2026-01-09")
-    assert t["exit_date"] == pd.Timestamp("2026-01-30")
+    assert t["exit_date"] == pd.Timestamp("2026-02-06")
     assert t["holding_weeks"] == 3
