@@ -96,6 +96,7 @@ def run_backtest(folder: str):
     output_dir = os.path.join(folder, "OUTPUT")
 
     tickers = find_ticker_list(input_dir, folder)
+    tickers = list(dict.fromkeys(tickers))
     print(f"Tickers loaded : {len(tickers)}")
     print(f"Weekly Stoch   : {STOCH_LENGTH}/{STOCH_K_SMOOTH}/{STOCH_D_SMOOTH}"
           f"  |  Entry K>={STOCH_K_MIN}  |  Exit K<D and K<{STOCH_K_MAX}\n")
@@ -104,20 +105,26 @@ def run_backtest(folder: str):
     ohlc = fetch_ohlc_bulk(yf_symbols, period="max")
 
     all_trades = []
+    errors = 0
     for i, (sym, yf_sym) in enumerate(zip(tickers, yf_symbols), 1):
-        df = ohlc.get(yf_sym)
-        if df is None:
-            print(f"  [{i:3d}/{len(tickers)}] {sym:10s}  — no data")
-            continue
+        try:
+            df = ohlc.get(yf_sym)
+            if df is None:
+                print(f"  [{i:3d}/{len(tickers)}] {sym:10s}  — no data")
+                continue
 
-        kd = compute_kd(df, STOCH_LENGTH, STOCH_K_SMOOTH, STOCH_D_SMOOTH)
-        trades = simulate_trades(kd, entry_level=STOCH_K_MIN, exit_level=STOCH_K_MAX)
-        for t in trades:
-            t["ticker"] = sym
-        all_trades.extend(trades)
+            kd = compute_kd(df, STOCH_LENGTH, STOCH_K_SMOOTH, STOCH_D_SMOOTH)
+            trades = simulate_trades(kd, entry_level=STOCH_K_MIN, exit_level=STOCH_K_MAX)
+            for t in trades:
+                t["ticker"] = sym
+            all_trades.extend(trades)
 
-        closed = sum(1 for t in trades if t["status"] == "closed")
-        print(f"  [{i:3d}/{len(tickers)}] {sym:10s}  {len(trades)} trades ({closed} closed)")
+            closed = sum(1 for t in trades if t["status"] == "closed")
+            print(f"  [{i:3d}/{len(tickers)}] {sym:10s}  {len(trades)} trades ({closed} closed)")
+
+        except Exception as exc:
+            errors += 1
+            print(f"  [{i:3d}/{len(tickers)}] {sym:10s}  ERROR: {exc}")
 
     out_name = f"Stoch_Backtest_Trades_{date.today()}.csv"
     out_path = os.path.join(output_dir, out_name)
@@ -133,6 +140,7 @@ def run_backtest(folder: str):
 
     print(f"\n{'=' * 55}")
     print(f"Total trades  : {len(all_trades)}")
+    print(f"Errors        : {errors}")
     print(f"Closed / Open : {len(closed_trades)} / {len(open_trades)}")
     if closed_trades:
         print(f"Win rate      : {len(wins) / len(closed_trades) * 100:.1f}%  ({len(wins)}/{len(closed_trades)})")
