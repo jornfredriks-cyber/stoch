@@ -1,4 +1,18 @@
+import os
+import sys
+from datetime import date
+
 import pandas as pd
+
+from scan_utils import _Tee, fetch_ohlc_bulk, find_ticker_list
+from stoch_scan import (
+    STOCH_D_SMOOTH,
+    STOCH_K_MAX,
+    STOCH_K_MIN,
+    STOCH_K_SMOOTH,
+    STOCH_LENGTH,
+    compute_kd,
+)
 
 
 def simulate_trades(
@@ -75,3 +89,85 @@ def simulate_trades(
         })
 
     return trades
+
+
+def run_backtest(folder: str):
+    input_dir = os.path.join(folder, "INPUT")
+    output_dir = os.path.join(folder, "OUTPUT")
+
+    tickers = find_ticker_list(input_dir, folder)
+    print(f"Tickers loaded : {len(tickers)}")
+    print(f"Weekly Stoch   : {STOCH_LENGTH}/{STOCH_K_SMOOTH}/{STOCH_D_SMOOTH}"
+          f"  |  Entry K>={STOCH_K_MIN}  |  Exit K<D and K<{STOCH_K_MAX}\n")
+
+    yf_symbols = [t.replace(".", "-").replace("/", "-") for t in tickers]
+    ohlc = fetch_ohlc_bulk(yf_symbols, period="max")
+
+    all_trades = []
+    for i, (sym, yf_sym) in enumerate(zip(tickers, yf_symbols), 1):
+        df = ohlc.get(yf_sym)
+        if df is None:
+            print(f"  [{i:3d}/{len(tickers)}] {sym:10s}  — no data")
+            continue
+
+        kd = compute_kd(df, STOCH_LENGTH, STOCH_K_SMOOTH, STOCH_D_SMOOTH)
+        trades = simulate_trades(kd, entry_level=STOCH_K_MIN, exit_level=STOCH_K_MAX)
+        for t in trades:
+            t["ticker"] = sym
+        all_trades.extend(trades)
+
+        closed = sum(1 for t in trades if t["status"] == "closed")
+        print(f"  [{i:3d}/{len(tickers)}] {sym:10s}  {len(trades)} trades ({closed} closed)")
+
+    out_name = f"Stoch_Backtest_Trades_{date.today()}.csv"
+    out_path = os.path.join(output_dir, out_name)
+    columns = ["ticker", "entry_date", "entry_price", "entry_k",
+               "exit_date", "exit_price", "exit_k", "exit_d",
+               "status", "return_pct", "holding_weeks"]
+    pd.DataFrame(all_trades, columns=columns).to_csv(out_path, index=False)
+
+    closed_trades = [t for t in all_trades if t["status"] == "closed"]
+    open_trades   = [t for t in all_trades if t["status"] == "open"]
+    wins   = [t for t in closed_trades if t["return_pct"] > 0]
+    losses = [t for t in closed_trades if t["return_pct"] <= 0]
+
+    print(f"\n{'=' * 55}")
+    print(f"Total trades  : {len(all_trades)}")
+    print(f"Closed / Open : {len(closed_trades)} / {len(open_trades)}")
+    if closed_trades:
+        print(f"Win rate      : {len(wins) / len(closed_trades) * 100:.1f}%  ({len(wins)}/{len(closed_trades)})")
+    if wins:
+        print(f"Avg win       : {sum(t['return_pct'] for t in wins) / len(wins):.2f}%")
+    if losses:
+        print(f"Avg loss      : {sum(t['return_pct'] for t in losses) / len(losses):.2f}%")
+    if closed_trades:
+        avg_hold = sum(t["holding_weeks"] for t in closed_trades) / len(closed_trades)
+        print(f"Avg hold (wk) : {avg_hold:.1f}")
+    print(f"Saved → OUTPUT/{out_name}")
+
+
+def main():
+    folder     = os.path.dirname(os.path.abspath(__file__))
+    input_dir  = os.path.join(folder, "INPUT")
+    output_dir = os.path.join(folder, "OUTPUT")
+    os.makedirs(input_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
+    for d in (input_dir, output_dir):
+        gitkeep = os.path.join(d, ".gitkeep")
+        if not os.path.exists(gitkeep):
+            open(gitkeep, "a").close()
+
+    log_path = os.path.join(output_dir, f"stoch_backtest_log_{date.today()}.txt")
+    log_file = open(log_path, "w", buffering=1)
+    sys.stdout = _Tee(sys.__stdout__, log_file)
+
+    try:
+        run_backtest(folder)
+    finally:
+        sys.stdout = sys.__stdout__
+        log_file.close()
+        print(f"Log saved  → OUTPUT/{os.path.basename(log_path)}")
+
+
+if __name__ == "__main__":
+    main()
