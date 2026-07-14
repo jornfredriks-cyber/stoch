@@ -1,0 +1,12 @@
+__pycache__/
+.pytest_cache/
+venv/
+*.pyc
+.DS_Store
+
+Stoch Raw Screener*.csv
+Stoch_SweetSpot_*.txt
+Stoch_Backtest_Trades_*.csv
+stoch_screener_log_*.txt
+stoch_scan_log_*.txt
+stoch_backtest_log_*.txt
