@@ -40,6 +40,49 @@ def find_latest_csv(folder: str) -> str:
     return max(files, key=os.path.getmtime)
 
 
+NORWEGIAN_EXCHANGES = {"OSLO"}
+
+
+def _parse_watchlist_line(line: str) -> list[str]:
+    tickers = []
+    for raw in line.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        if ":" in raw:
+            exchange, symbol = raw.split(":", 1)
+            exchange = exchange.strip().upper()
+            symbol = symbol.strip()
+            if exchange in NORWEGIAN_EXCHANGES:
+                tickers.append(f"{symbol}.OL")
+            else:
+                tickers.append(symbol)
+        else:
+            tickers.append(raw)
+    return tickers
+
+
+def find_ticker_list(input_folder: str, fallback_folder: str) -> list[str]:
+    """
+    Looks for a *Watchlist* file (TradingView export: plain text,
+    comma-separated EXCHANGE:TICKER) in input_folder. Falls back to the
+    latest screener CSV in fallback_folder if no watchlist file exists.
+    """
+    watchlist_files = glob.glob(os.path.join(input_folder, "*Watchlist*"))
+    if watchlist_files:
+        watchlist_path = max(watchlist_files, key=os.path.getmtime)
+        with open(watchlist_path) as f:
+            content = f.read()
+        tickers = []
+        for line in content.splitlines():
+            tickers.extend(_parse_watchlist_line(line))
+        return tickers
+
+    csv_path = find_latest_csv(fallback_folder)
+    df = pd.read_csv(csv_path)
+    return df["Symbol"].dropna().tolist()
+
+
 def _chunks(items: list[str], size: int):
     for start in range(0, len(items), size):
         yield items[start:start + size]
@@ -81,6 +124,7 @@ def fetch_ohlc_bulk(
     chunk_size: int = FETCH_CHUNK_SIZE,
     retries: int = FETCH_RETRIES,
     retry_delay: float = FETCH_RETRY_DELAY,
+    period: str = HISTORY_PERIOD,
 ) -> dict[str, pd.DataFrame]:
     result = {}
     unique_symbols = list(dict.fromkeys(yf_symbols))
@@ -91,7 +135,7 @@ def fetch_ohlc_bulk(
             try:
                 downloaded = yf.download(
                     " ".join(chunk),
-                    period=HISTORY_PERIOD,
+                    period=period,
                     interval="1d",
                     group_by="ticker",
                     progress=False,

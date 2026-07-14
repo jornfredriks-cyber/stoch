@@ -22,6 +22,40 @@ K_RISING_LOOKBACK = int(  _st.get("k_rising_lookback",  1))
 FETCH_CHUNK_SIZE  = int(  _st.get("fetch_chunk_size",  50))
 
 
+def compute_kd(
+    df: pd.DataFrame,
+    stoch_length: int = STOCH_LENGTH,
+    k_smooth: int = STOCH_K_SMOOTH,
+    d_smooth: int = STOCH_D_SMOOTH,
+) -> pd.DataFrame:
+    """
+    Resamples the daily OHLC frame into Friday-anchored weekly bins
+    (high=max, low=min, close=last) and computes the weekly Stochastic
+    %K/%D lines. Unlike is_near_last_week_low(), the final bin is NOT
+    dropped/deferred when the current week is still in progress — it is
+    used as-is, matching how TradingView plots a live weekly Stochastic
+    off the still-forming candle. This is a deliberate difference from
+    lw_low_scan.py's completed-week convention, not an oversight.
+
+    Returns a DataFrame indexed by weekly bar with columns "close", "k",
+    "d". %k/%d are NaN for the initial weeks where the rolling windows
+    aren't full yet. Empty/None input returns an empty DataFrame with
+    those columns.
+    """
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=["close", "k", "d"])
+
+    weekly = df.resample("W-FRI").agg({"high": "max", "low": "min", "close": "last"}).dropna()
+
+    lowest_low   = weekly["low"].rolling(stoch_length).min()
+    highest_high = weekly["high"].rolling(stoch_length).max()
+    raw_k = 100 * (weekly["close"] - lowest_low) / (highest_high - lowest_low)
+    k_line = raw_k.rolling(k_smooth).mean()
+    d_line = k_line.rolling(d_smooth).mean()
+
+    return pd.DataFrame({"close": weekly["close"], "k": k_line, "d": d_line})
+
+
 def is_stoch_sweet_spot(
     df: pd.DataFrame,
     stoch_length: int = STOCH_LENGTH,
@@ -37,34 +71,19 @@ def is_stoch_sweet_spot(
     strategy's "sweet spot" band (32-80 by default) — with %K above %D and
     %K rising versus `k_rising_lookback` weeks back.
 
-    Resamples the daily OHLC frame into Friday-anchored weekly bins
-    (high=max, low=min, close=last). The final bin is NOT dropped/deferred
-    when the current week is still in progress — it is used as-is, matching
-    how TradingView plots a live weekly Stochastic off the still-forming
-    candle.
-
     Returns:
         (True,  k_value, d_value)  — latest %K inside band, above %D, rising
         (False, None,    None)     — condition not met, or insufficient
                                        weekly history to compute both lines
     """
-    if df is None or len(df) == 0:
-        return False, None, None
+    kd = compute_kd(df, stoch_length, k_smooth, d_smooth)
 
-    weekly = df.resample("W-FRI").agg({"high": "max", "low": "min", "close": "last"}).dropna()
-
-    lowest_low   = weekly["low"].rolling(stoch_length).min()
-    highest_high = weekly["high"].rolling(stoch_length).max()
-    raw_k = 100 * (weekly["close"] - lowest_low) / (highest_high - lowest_low)
-    k_line = raw_k.rolling(k_smooth).mean()
-    d_line = k_line.rolling(d_smooth).mean()
-
-    valid = d_line.dropna()
+    valid = kd["d"].dropna()
     if len(valid) < k_rising_lookback + 1:
         return False, None, None
 
-    k_now  = k_line.loc[valid.index[-1]]
-    k_prev = k_line.loc[valid.index[-1 - k_rising_lookback]]
+    k_now  = kd["k"].loc[valid.index[-1]]
+    k_prev = kd["k"].loc[valid.index[-1 - k_rising_lookback]]
     d_now  = valid.iloc[-1]
 
     qualifies = (k_min <= k_now <= k_max) and (k_now > d_now) and (k_now > k_prev)
