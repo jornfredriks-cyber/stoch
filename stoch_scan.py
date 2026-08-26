@@ -22,6 +22,22 @@ K_RISING_LOOKBACK = int(  _st.get("k_rising_lookback",  1))
 FETCH_CHUNK_SIZE  = int(  _st.get("fetch_chunk_size",  50))
 
 
+def resample_weekly(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Resamples the daily OHLC frame into Friday-anchored weekly bins
+    (high=max, low=min, close=last). The final bin is NOT dropped/deferred
+    when the current week is still in progress — it is used as-is,
+    matching how TradingView plots a live weekly candle off the
+    still-forming week. Extracted from compute_kd() so a parameter sweep
+    (backtest_signal_sweep.py) can resample once per ticker and reuse it
+    across many stoch_length/k_smooth/d_smooth combos, instead of
+    re-resampling per combo.
+    """
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=["high", "low", "close"])
+    return df.resample("W-FRI").agg({"high": "max", "low": "min", "close": "last"}).dropna()
+
+
 def compute_kd(
     df: pd.DataFrame,
     stoch_length: int = STOCH_LENGTH,
@@ -29,23 +45,17 @@ def compute_kd(
     d_smooth: int = STOCH_D_SMOOTH,
 ) -> pd.DataFrame:
     """
-    Resamples the daily OHLC frame into Friday-anchored weekly bins
-    (high=max, low=min, close=last) and computes the weekly Stochastic
-    %K/%D lines. Unlike is_near_last_week_low(), the final bin is NOT
-    dropped/deferred when the current week is still in progress — it is
-    used as-is, matching how TradingView plots a live weekly Stochastic
-    off the still-forming candle. This is a deliberate difference from
-    lw_low_scan.py's completed-week convention, not an oversight.
+    Resamples the daily OHLC frame into Friday-anchored weekly bins (see
+    resample_weekly()) and computes the weekly Stochastic %K/%D lines.
 
     Returns a DataFrame indexed by weekly bar with columns "close", "k",
     "d". %k/%d are NaN for the initial weeks where the rolling windows
     aren't full yet. Empty/None input returns an empty DataFrame with
     those columns.
     """
-    if df is None or len(df) == 0:
+    weekly = resample_weekly(df)
+    if weekly.empty:
         return pd.DataFrame(columns=["close", "k", "d"])
-
-    weekly = df.resample("W-FRI").agg({"high": "max", "low": "min", "close": "last"}).dropna()
 
     lowest_low   = weekly["low"].rolling(stoch_length).min()
     highest_high = weekly["high"].rolling(stoch_length).max()

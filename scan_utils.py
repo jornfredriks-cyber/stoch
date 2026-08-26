@@ -130,7 +130,16 @@ def fetch_ohlc_bulk(
     retries: int = FETCH_RETRIES,
     retry_delay: float = FETCH_RETRY_DELAY,
     period: str = HISTORY_PERIOD,
+    auto_adjust: bool = True,
 ) -> dict[str, pd.DataFrame]:
+    """
+    auto_adjust=True (default) fully adjusts OHLC for splits AND dividends,
+    which is what screener.py/stoch_scan.py/backtest.py have always used.
+    Pass auto_adjust=False for split-adjusted-only prices (dividend
+    adjustment left out) -- matches TradingView's default unadjusted chart
+    much more closely for long-history, high-dividend tickers. See
+    backtest_signal.py, which uses auto_adjust=False for this reason.
+    """
     result = {}
     unique_symbols = list(dict.fromkeys(yf_symbols))
 
@@ -144,7 +153,7 @@ def fetch_ohlc_bulk(
                     interval="1d",
                     group_by="ticker",
                     progress=False,
-                    auto_adjust=True,
+                    auto_adjust=auto_adjust,
                     threads=False,
                 )
                 break
