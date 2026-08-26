@@ -4,14 +4,9 @@ venv/
 *.pyc
 .DS_Store
 
-Stoch Raw Screener*.csv
-Stoch_SweetSpot_*.txt
-stoch_screener_log_*.txt
-stoch_scan_log_*.txt
-
-# Generated run artifacts — everything in INPUT/ and OUTPUT/ is transient
-# local data, never versioned. Only the folders themselves (via .gitkeep)
-# are tracked.
+# Generated run artifacts — everything in INPUT/ and OUTPUT/ (including its
+# Screener/ and SweetSpot/ subfolders) is transient local data, never
+# versioned. Only the folders themselves (via .gitkeep) are tracked.
 INPUT/*
 OUTPUT/*
 !INPUT/.gitkeep

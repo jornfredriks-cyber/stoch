@@ -84,16 +84,18 @@ def main():
     log_file = open(log_path, "w", buffering=1)
     sys.stdout = _Tee(sys.__stdout__, log_file)
 
+    screener_dir = os.path.join(folder, "OUTPUT", "Screener")
+
     try:
-        _run(folder, output_dir)
+        _run(screener_dir, output_dir)
     finally:
         sys.stdout = sys.__stdout__
         log_file.close()
         print(f"Log saved  → OUTPUT/{os.path.basename(log_path)}")
 
 
-def _run(folder: str, output_dir: str):
-    csv_path = find_latest_csv(folder)
+def _run(screener_dir: str, output_dir: str):
+    csv_path = find_latest_csv(screener_dir)
     print(f"Screener file : {os.path.basename(csv_path)}")
 
     tv      = pd.read_csv(csv_path)

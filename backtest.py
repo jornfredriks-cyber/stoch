@@ -94,8 +94,9 @@ def simulate_trades(
 def run_backtest(folder: str):
     input_dir = os.path.join(folder, "INPUT")
     output_dir = os.path.join(folder, "OUTPUT")
+    screener_dir = os.path.join(folder, "OUTPUT", "Screener")
 
-    tickers = find_ticker_list(input_dir, folder)
+    tickers = find_ticker_list(input_dir, screener_dir)
     tickers = list(dict.fromkeys(tickers))
     print(f"Tickers loaded : {len(tickers)}")
     print(f"Weekly Stoch   : {STOCH_LENGTH}/{STOCH_K_SMOOTH}/{STOCH_D_SMOOTH}"

@@ -105,21 +105,24 @@ def is_stoch_sweet_spot(
 
 
 def main():
-    folder   = os.path.dirname(os.path.abspath(__file__))
-    log_path = os.path.join(folder, f"stoch_scan_log_{date.today()}.txt")
+    folder       = os.path.dirname(os.path.abspath(__file__))
+    screener_dir = os.path.join(folder, "OUTPUT", "Screener")
+    output_dir   = os.path.join(folder, "OUTPUT", "SweetSpot")
+    os.makedirs(output_dir, exist_ok=True)
+    log_path = os.path.join(output_dir, f"stoch_scan_log_{date.today()}.txt")
     log_file = open(log_path, "w", buffering=1)
     sys.stdout = _Tee(sys.__stdout__, log_file)
 
     try:
-        _run(folder)
+        _run(screener_dir, output_dir)
     finally:
         sys.stdout = sys.__stdout__
         log_file.close()
-        print(f"Log saved  → {os.path.basename(log_path)}")
+        print(f"Log saved  → OUTPUT/SweetSpot/{os.path.basename(log_path)}")
 
 
-def _run(folder: str):
-    csv_path = find_latest_csv(folder)
+def _run(screener_dir: str, output_dir: str):
+    csv_path = find_latest_csv(screener_dir)
     print(f"Screener file : {os.path.basename(csv_path)}")
 
     tv      = pd.read_csv(csv_path)
@@ -179,10 +182,10 @@ def _run(folder: str):
 
     if candidates:
         out_name = f"Stoch_SweetSpot_{date.today()}.txt"
-        out_path = os.path.join(folder, out_name)
+        out_path = os.path.join(output_dir, out_name)
         with open(out_path, "w") as f:
             f.write("\n".join(candidates))
-        print(f"Saved → {out_name}")
+        print(f"Saved → OUTPUT/SweetSpot/{out_name}")
     else:
         print("No Stoch Sweet Spot candidates found.")
 

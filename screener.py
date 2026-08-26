@@ -170,21 +170,23 @@ def run_screener(output_folder: str | None = None) -> str:
     out_name = f"Stoch Raw Screener_{today}.csv"
     out_path = os.path.join(folder, out_name)
     pd.DataFrame({"Symbol": final}).to_csv(out_path, index=False)
-    print(f"Saved → {out_name}  ({len(final)} tickers)")
+    print(f"Saved → OUTPUT/Screener/{out_name}  ({len(final)} tickers)")
     return out_path
 
 
 def main():
-    folder   = os.path.dirname(os.path.abspath(__file__))
-    log_path = os.path.join(folder, f"stoch_screener_log_{date.today()}.txt")
+    folder     = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(folder, "OUTPUT", "Screener")
+    os.makedirs(output_dir, exist_ok=True)
+    log_path = os.path.join(output_dir, f"stoch_screener_log_{date.today()}.txt")
     log_file = open(log_path, "w", buffering=1)
     sys.stdout = _Tee(sys.__stdout__, log_file)
     try:
-        run_screener(folder)
+        run_screener(output_dir)
     finally:
         sys.stdout = sys.__stdout__
         log_file.close()
-        print(f"Screener log → {os.path.basename(log_path)}")
+        print(f"Screener log → OUTPUT/Screener/{os.path.basename(log_path)}")
 
 
 if __name__ == "__main__":
