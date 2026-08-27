@@ -12,36 +12,19 @@ from scan_utils import _Tee, adr, fetch_ohlc_bulk, fetch_universe
 # ── Screener parameters — loaded from stoch_config.ini, with hardcoded fallbacks
 _cfg = configparser.ConfigParser()
 _cfg.read(os.path.join(os.path.dirname(os.path.abspath(__file__)), "stoch_config.ini"))
-_s = _cfg["screener"] if "screener" in _cfg else {}
+_s = _cfg["stoch_basic_screener"] if "stoch_basic_screener" in _cfg else {}
 
-MIN_PRICE         = float(_s.get("min_price",         5.0))
-MIN_MARKET_CAP    = int(  _s.get("min_market_cap",    500_000_000))
-MIN_AVG_VOL_30D   = int(  _s.get("min_avg_vol_30d",   500_000))
-MIN_ADR_PCT       = float(_s.get("min_adr_pct",       2.0))
-EMA_FAST          = int(  _s.get("ema_fast",          50))
-EMA_SLOW          = int(  _s.get("ema_slow",          200))
-RSI_LOW           = float(_s.get("rsi_low",           45))
-RSI_HIGH          = float(_s.get("rsi_high",          75))
-ATH_MAX_DIST_PCT  = float(_s.get("ath_max_dist_pct",  5.0))
-FETCH_CHUNK_SIZE  = int(  _s.get("fetch_chunk_size",  50))
+MIN_PRICE        = float(_s.get("min_price",        10.0))
+MIN_MARKET_CAP   = int(  _s.get("min_market_cap",   300_000_000))
+MIN_AVG_VOL_30D  = int(  _s.get("min_avg_vol_30d",  1_000_000))
+MIN_ADR_PCT      = float(_s.get("min_adr_pct",      2.0))
+FETCH_CHUNK_SIZE = int(  _s.get("fetch_chunk_size", 50))
 
-
-# ── Technical filter functions ────────────────────────────────────────────────
-
-def _ema(s: pd.Series, span: int) -> pd.Series:
-    return s.ewm(span=span, adjust=False).mean()
-
-
-def _rsi(close: pd.Series, period: int = 14) -> float:
-    delta = close.diff()
-    gain  = delta.clip(lower=0).ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    loss  = (-delta.clip(upper=0)).ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    rs    = gain / loss
-    return float((100 - 100 / (1 + rs)).iloc[-1])
+MIN_BARS = 30  # enough for a 30-day avg-volume window and a 14-period ADR
 
 
 def _passes(df: pd.DataFrame) -> tuple[bool, str]:
-    if len(df) < EMA_SLOW + 10:
+    if len(df) < MIN_BARS:
         return False, "bars"
     c, h, l, v = df["close"], df["high"], df["low"], df["volume"]
 
@@ -49,17 +32,8 @@ def _passes(df: pd.DataFrame) -> tuple[bool, str]:
         return False, "price"
     if float(v.tail(30).mean()) < MIN_AVG_VOL_30D:
         return False, "volume"
-    if _ema(c, EMA_FAST).iloc[-1] <= _ema(c, EMA_SLOW).iloc[-1]:
-        return False, "ema"
     if adr(h, l, c) < MIN_ADR_PCT:
         return False, "adr"
-    rsi = _rsi(c)
-    if not (RSI_LOW <= rsi <= RSI_HIGH):
-        return False, "rsi"
-    ath  = float(c.max())
-    dist = (ath - float(c.iloc[-1])) / ath * 100
-    if not (0.0 <= dist <= ATH_MAX_DIST_PCT):
-        return False, "ath"
     return True, "ok"
 
 
@@ -70,12 +44,11 @@ def run_screener(output_folder: str | None = None) -> str:
     today  = date.today()
 
     print("=" * 55)
-    print(f"Stoch Screener  |  {today}")
+    print(f"Stoch Basic Screener  |  {today}")
     print(
         f"Price>{MIN_PRICE} | MktCap>{MIN_MARKET_CAP / 1e6:.0f}M | "
-        f"AvgVol30D>{MIN_AVG_VOL_30D / 1e3:.0f}K | ADR>{MIN_ADR_PCT}% | "
-        f"EMA{EMA_FAST}>EMA{EMA_SLOW} | RSI {RSI_LOW}-{RSI_HIGH} | "
-        f"ATH dist 0-{ATH_MAX_DIST_PCT}%"
+        f"AvgVol30D>{MIN_AVG_VOL_30D / 1e3:.0f}K | ADR>{MIN_ADR_PCT}%  "
+        f"(no trend/ATH-proximity filter — by design, see stoch_config.ini)"
     )
     print("=" * 55)
 
@@ -122,18 +95,18 @@ def run_screener(output_folder: str | None = None) -> str:
     final = [sym for sym in passed if mcap_map.get(sym) and mcap_map[sym] >= MIN_MARKET_CAP]
     print(f"  {len(final)} pass market cap >{MIN_MARKET_CAP / 1e6:.0f}M\n")
 
-    out_name = f"Stoch Raw Screener_{today}.csv"
+    out_name = f"Stoch Basic Screener_{today}.csv"
     out_path = os.path.join(folder, out_name)
     pd.DataFrame({"Symbol": final}).to_csv(out_path, index=False)
-    print(f"Saved → OUTPUT/Screener/{out_name}  ({len(final)} tickers)")
+    print(f"Saved → OUTPUT/BasicScreener/{out_name}  ({len(final)} tickers)")
     return out_path
 
 
 def main():
     folder     = os.path.dirname(os.path.abspath(__file__))
-    output_dir = os.path.join(folder, "OUTPUT", "Screener")
+    output_dir = os.path.join(folder, "OUTPUT", "BasicScreener")
     os.makedirs(output_dir, exist_ok=True)
-    log_path = os.path.join(output_dir, f"stoch_screener_log_{date.today()}.txt")
+    log_path = os.path.join(output_dir, f"stoch_basic_screener_log_{date.today()}.txt")
     log_file = open(log_path, "w", buffering=1)
     sys.stdout = _Tee(sys.__stdout__, log_file)
     try:
@@ -141,7 +114,7 @@ def main():
     finally:
         sys.stdout = sys.__stdout__
         log_file.close()
-        print(f"Screener log → OUTPUT/Screener/{os.path.basename(log_path)}")
+        print(f"Screener log → OUTPUT/BasicScreener/{os.path.basename(log_path)}")
 
 
 if __name__ == "__main__":

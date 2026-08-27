@@ -1,8 +1,10 @@
 import glob
+import io
 import os
 import time
 
 import pandas as pd
+import requests
 import yfinance as yf
 
 # Point libcurl at certifi's CA bundle so Homebrew OpenSSL mismatches don't fail
@@ -17,6 +19,54 @@ HISTORY_PERIOD    = "1y"
 FETCH_CHUNK_SIZE  = 50
 FETCH_RETRIES     = 2
 FETCH_RETRY_DELAY = 2.0
+
+NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
+NYSE_URL   = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
+
+
+def fetch_universe() -> list[str]:
+    """
+    Downloads the full NASDAQ + NYSE common-stock ticker list from NASDAQ
+    Trader. Shared by every Stoch screener variant (screener.py,
+    stoch_basic_screener.py) — extracted here 2026-08-27 so a second
+    screener didn't have to copy-paste it.
+    """
+    headers = {"User-Agent": "Mozilla/5.0"}
+    tickers: list[str] = []
+
+    try:
+        r = requests.get(NASDAQ_URL, headers=headers, timeout=30)
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text), sep="|")
+        df = df[(df["ETF"] == "N") & (df["Test Issue"] == "N")]
+        df = df[df["Symbol"].str.match(r"^[A-Z]{1,5}$", na=False)]
+        tickers += df["Symbol"].tolist()
+        print(f"  NASDAQ: {len(df)} common stocks")
+    except Exception as e:
+        print(f"  NASDAQ fetch failed: {e}")
+
+    try:
+        r = requests.get(NYSE_URL, headers=headers, timeout=30)
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text), sep="|")
+        df = df[(df["ETF"] == "N") & (df["Test Issue"] == "N") & (df["Exchange"] == "N")]
+        df = df[df["ACT Symbol"].str.match(r"^[A-Z]{1,5}$", na=False)]
+        tickers += df["ACT Symbol"].tolist()
+        print(f"  NYSE:   {len(df)} common stocks")
+    except Exception as e:
+        print(f"  NYSE fetch failed: {e}")
+
+    seen, out = set(), []
+    for t in tickers:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def adr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> float:
+    """Average Daily Range %, mean of (high-low)/close*100 over the last `period` bars."""
+    return float(((high - low) / close * 100).tail(period).mean())
 
 
 class _Tee:
