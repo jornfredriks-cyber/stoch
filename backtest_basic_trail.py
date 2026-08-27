@@ -119,8 +119,14 @@ def simulate_trades_basic_trail(
     a breakout-above-resistance entry.
       1. On the signal, immediately look backward for the LAST SIGNIFICANT
          HIGH -- a weekly swing-high pivot (see _last_significant_high())
-         within lookback_weeks before the signal. If none qualifies, the
-         signal is skipped.
+         within lookback_weeks before the signal. If none qualifies, OR
+         the pivot found is already at-or-below the signal candle's own
+         close (2026-08-27, user observation on FSLR: the confirmed pivot
+         can lag behind a still-climbing stock's true recent high, since
+         that high can't be recognized as a pivot until it has
+         pivot_weeks of confirmed pullback after it -- there's no
+         forward-looking breakout left to test if resistance was already
+         cleared before the signal even fired), the signal is skipped.
       2. That pivot's price becomes a BUY-STOP order (fills the moment
          price trades UP THROUGH it, not a limit order for buying dips),
          active for breakout_window_days TRADING days after the signal.
@@ -178,7 +184,16 @@ def simulate_trades_basic_trail(
             if prev_k is not None and prev_k < entry_level and k > entry_level and k > d:
                 if breakout_window_days > 0:
                     level = _last_significant_high(weekly_ohlc, dt, pivot_weeks, lookback_weeks)
-                    if level is not None:
+                    # level must be a genuine FUTURE breakout, i.e. still above the
+                    # signal candle's own close. If the confirmed pivot has already
+                    # been surpassed (common when a stock is still climbing without
+                    # a confirmed pullback -- the true recent high can't be
+                    # recognized as a pivot yet, so an older, lower one is found
+                    # instead), there's no forward breakout left to test; a buy-stop
+                    # placed there would just fill almost immediately at whatever
+                    # price is next, not confirm anything. Skip (2026-08-27, user
+                    # observation on FSLR).
+                    if level is not None and level > close:
                         window_days = daily.loc[daily.index > dt].iloc[:breakout_window_days]
                         touch = _find_breakout_touch(window_days, level)
                         if touch is not None:
@@ -189,7 +204,7 @@ def simulate_trades_basic_trail(
                             stop = fill_price * (1 - trail_pct / 100)
                             next_prev_week_end = fill_date
                         # else: window elapsed with no breakout -- "No trade!", skip
-                    # else: no qualifying weekly swing-high pivot in range -- skip
+                    # else: no qualifying pivot, or it's already below the signal close -- skip
                 else:
                     in_position = True
                     entry = {"entry_date": dt, "entry_price": close, "entry_k": round(k, 2)}

@@ -239,6 +239,33 @@ def test_no_qualifying_pivot_skips():
     assert trades == []
 
 
+def test_pivot_already_below_signal_close_skips():
+    # Same 120 pivot as the other breakout tests, but the signal candle's
+    # OWN close (125) is already above it -- resistance was cleared before
+    # the signal even fired, so there's no forward breakout left to test.
+    # Regression for the FSLR observation (2026-08-27): a buy-stop placed
+    # below the current price isn't a breakout confirmation, it just fills
+    # almost immediately. Must skip, not enter.
+    weekly = _weekly([
+        ("2025-12-26", 100, 20, 25),
+        ("2026-01-02", 125, 35, 28),  # signal close (125) > the 120 pivot -- already broken
+    ])
+    weekly_ohlc = _weekly_ohlc([
+        ("2025-11-07", 100, 90, 95), ("2025-11-14", 105, 95, 100), ("2025-11-21", 110, 100, 105),
+        ("2025-11-28", 120, 105, 115),  # the pivot
+        ("2025-12-05", 115, 100, 105), ("2025-12-12", 110, 95, 100), ("2025-12-19", 95, 85, 90),
+        ("2025-12-26", 90, 80, 85), ("2026-01-02", 125, 118, 122),
+    ])
+    daily = _daily([
+        ("2026-01-05", 128, 124, 126, 130),  # would touch 120 immediately if not skipped
+    ])
+    trades = simulate_trades_basic_trail(
+        daily, weekly, entry_level=32.0, trail_pct=20.0,
+        breakout_window_days=10, weekly_ohlc=weekly_ohlc, pivot_weeks=3, lookback_weeks=26,
+    )
+    assert trades == []
+
+
 def test_breakout_never_touched_within_window_no_trade():
     # Same 120 pivot as above, but every day's high in the 10-day window
     # stays below it -- "No trade!" (the exact case the user validated by
