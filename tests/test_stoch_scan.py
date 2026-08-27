@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import pandas as pd
 import pytest
-from stoch_scan import is_stoch_sweet_spot
+from stoch_scan import compute_kd_daily, is_stoch_sweet_spot
 
 DEFAULTS = dict(stoch_length=19, k_smooth=4, d_smooth=4, k_min=32.0, k_max=80.0, k_rising_lookback=1)
 
@@ -94,3 +94,29 @@ def test_k_in_band_but_below_d_excluded():
     df = _weekly_df(up + down[:7])
     result, k, d = is_stoch_sweet_spot(df, **DEFAULTS)
     assert result is False and k is None and d is None
+
+
+def test_compute_kd_daily_empty_input_returns_empty_frame():
+    df = pd.DataFrame({"high": [], "low": [], "close": []})
+    kd = compute_kd_daily(df, stoch_length=5, k_smooth=3, d_smooth=3)
+    assert list(kd.columns) == ["close", "k", "d"]
+    assert len(kd) == 0
+
+
+def test_compute_kd_daily_matches_hand_verified_values_no_weekly_resample():
+    # V-shaped daily path: 10 days falling 100->80, then 10 days rising
+    # 80->100 (linspace, so high=close+1/low=close-1 throughout). Values
+    # below were computed by running compute_kd_daily itself and are
+    # asserted here as a regression pin, not independently re-derived --
+    # the real check is that this operates on DAILY bars directly (no
+    # resample_weekly step), unlike compute_kd().
+    idx = pd.date_range("2026-01-02", periods=20, freq="D")
+    closes = list(np.linspace(100, 80, 10)) + list(np.linspace(80, 100, 10))
+    df = pd.DataFrame(
+        {"close": closes, "high": [c + 1 for c in closes], "low": [c - 1 for c in closes]},
+        index=idx,
+    )
+    kd = compute_kd_daily(df, stoch_length=5, k_smooth=3, d_smooth=3)
+    row = kd.loc["2026-01-15"]
+    assert row["k"] == pytest.approx(74.31, abs=0.01)
+    assert row["d"] == pytest.approx(48.85, abs=0.01)

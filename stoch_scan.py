@@ -66,6 +66,36 @@ def compute_kd(
     return pd.DataFrame({"close": weekly["close"], "k": k_line, "d": d_line})
 
 
+def compute_kd_daily(
+    df: pd.DataFrame,
+    stoch_length: int,
+    k_smooth: int,
+    d_smooth: int,
+) -> pd.DataFrame:
+    """
+    Same %K/%D math as compute_kd(), applied DIRECTLY to daily OHLC bars --
+    no weekly resample. Needs "high", "low", "close" columns. Added
+    2026-08-27 for backtest_basic_trail.py's daily-Stochastic confirmation
+    gate: a daily oscillator is a materially different, faster-moving
+    signal from the weekly one, not just a higher-resolution copy of it,
+    so it takes its own independent length/smoothing settings (no
+    module-level defaults here -- the caller always passes them explicitly).
+
+    Returns a DataFrame indexed by daily bar with columns "close", "k",
+    "d". Empty/None input returns an empty DataFrame with those columns.
+    """
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=["close", "k", "d"])
+
+    lowest_low   = df["low"].rolling(stoch_length).min()
+    highest_high = df["high"].rolling(stoch_length).max()
+    raw_k = 100 * (df["close"] - lowest_low) / (highest_high - lowest_low)
+    k_line = raw_k.rolling(k_smooth).mean()
+    d_line = k_line.rolling(d_smooth).mean()
+
+    return pd.DataFrame({"close": df["close"], "k": k_line, "d": d_line})
+
+
 def is_stoch_sweet_spot(
     df: pd.DataFrame,
     stoch_length: int = STOCH_LENGTH,
