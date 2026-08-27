@@ -166,11 +166,12 @@ def test_sequential_trades_after_an_intraweek_stop_out():
     assert trades[1]["exit_date"] == pd.Timestamp("2026-02-03")
 
 
-def test_confirmation_passes_enters_at_day3_close_not_signal_close():
+def test_limit_fills_the_day_after_confirmation_at_day3_close():
     # Signal Friday 2026-01-09 at close=100. confirm_days=3 -> day 3 after
     # the signal is Wed 2026-01-14. Its close (105) is above the signal
-    # close (100), so confirmation passes: entry is at day 3's date/price,
-    # NOT the signal week's.
+    # close (100) -> confirmed, 105 becomes a day-only limit price valid
+    # for Thu 2026-01-15. Thu's low (103) touches it -> filled AT 105
+    # (the limit price, not Thu's actual low), dated Thu -- NOT Wednesday.
     weekly = _weekly([
         ("2026-01-02", 100, 20, 25),
         ("2026-01-09", 100, 35, 28),  # signal fires, but entry is deferred
@@ -179,16 +180,52 @@ def test_confirmation_passes_enters_at_day3_close_not_signal_close():
     daily = _daily([
         ("2026-01-12", 98,  95),
         ("2026-01-13", 102, 99),
-        ("2026-01-14", 105, 101),  # day 3: close=105 > signal close(100) -> CONFIRMED
-        ("2026-01-15", 106, 102),
-        ("2026-01-16", 108, 103),
+        ("2026-01-14", 105, 101),  # day 3: close=105 > signal close(100) -> CONFIRMED, limit=105
+        ("2026-01-15", 106, 103),  # day 4: low=103 <= limit(105) -> FILLED here at 105
+        ("2026-01-16", 108, 104),
     ])
     trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0, confirm_days=3)
     assert len(trades) == 1
     t = trades[0]
-    assert t["entry_date"] == pd.Timestamp("2026-01-14")
+    assert t["entry_date"] == pd.Timestamp("2026-01-15")
     assert t["entry_price"] == 105
     assert t["entry_k"] == 35  # still reports the signal week's %K
+
+
+def test_limit_not_touched_next_day_the_trade_is_off():
+    # Same confirmed limit (105), but day 4's low (108) never comes back
+    # down to it -- the order expires unfilled, no trade, no retry on day
+    # 5 or later.
+    weekly = _weekly([
+        ("2026-01-02", 100, 20, 25),
+        ("2026-01-09", 100, 35, 28),
+        ("2026-01-16", 115, 50, 40),
+    ])
+    daily = _daily([
+        ("2026-01-12", 98,  95),
+        ("2026-01-13", 102, 99),
+        ("2026-01-14", 105, 101),  # day 3: confirmed, limit=105
+        ("2026-01-15", 112, 108),  # day 4: low=108 > limit(105) -> NOT filled, trade is off
+        ("2026-01-16", 115, 110),  # would have touched 105 by now, but no retry
+    ])
+    trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0, confirm_days=3)
+    assert trades == []
+
+
+def test_no_next_trading_day_after_confirmation_trade_is_off():
+    # Day 3 confirms, but it's the LAST daily bar in the dataset -- no
+    # day 4 exists to even attempt the fill. No crash, just no trade.
+    weekly = _weekly([
+        ("2026-01-02", 100, 20, 25),
+        ("2026-01-09", 100, 35, 28),
+    ])
+    daily = _daily([
+        ("2026-01-12", 98,  95),
+        ("2026-01-13", 102, 99),
+        ("2026-01-14", 105, 101),  # day 3: confirmed, limit=105 -- but no day 4 follows
+    ])
+    trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0, confirm_days=3)
+    assert trades == []
 
 
 def test_confirmation_fails_skips_the_signal_entirely():
@@ -225,22 +262,22 @@ def test_confirmation_skipped_when_insufficient_future_trading_days():
     assert trades == []
 
 
-def test_pre_entry_days_during_confirmation_window_cannot_trigger_a_stop():
-    # Regression test: the confirmation window's own daily lows (before the
-    # position exists) must never be scanned for a stop touch, even though
-    # they're deeper than the stop that gets established once entry
-    # actually happens on day 3.
+def test_pre_entry_days_before_the_fill_cannot_trigger_a_stop():
+    # Regression test: neither the confirmation window's daily lows (days
+    # 1-3) NOR anything before the actual fill date (day 4) may ever be
+    # scanned for a stop touch, even though they're far deeper than the
+    # stop that gets established once the position actually exists.
     weekly = _weekly([
         ("2026-01-02", 100, 20, 25),
-        ("2026-01-09", 100, 35, 28),  # signal; confirmation resolves entry on day 3
+        ("2026-01-09", 100, 35, 28),  # signal; confirmation+fill resolves entry on day 4
         ("2026-01-16", 108, 50, 40),  # first full week post-entry: survives -> ratchet
         ("2026-01-23", 92,  40, 45),  # exits intraweek at the ratcheted stop
     ])
     daily = _daily([
-        ("2026-01-12", 90,  70),   # pre-entry: low=70, deep, must be IGNORED (no position yet)
-        ("2026-01-13", 95,  75),   # pre-entry: low=75, must be IGNORED
-        ("2026-01-14", 105, 90),   # day 3: close=105 > 100 -> CONFIRMED, entry here, stop=84
-        ("2026-01-15", 106, 85),   # post-entry: low=85 > stop(84) -> hold
+        ("2026-01-12", 90,  70),   # pre-confirmation: low=70, deep, must be IGNORED
+        ("2026-01-13", 95,  75),   # pre-confirmation: low=75, must be IGNORED
+        ("2026-01-14", 105, 65),   # day 3: close=105 > 100 -> CONFIRMED, limit=105; low=65 IGNORED (fill checks day 4, not day 3)
+        ("2026-01-15", 106, 90),   # day 4: low=90 <= limit(105) -> FILLED here at 105, stop=84
         ("2026-01-16", 108, 90),   # post-entry: low=90 > stop(84) -> hold; week survives, ratchet to 86.4
         ("2026-01-19", 92,  88),   # low=88 > stop(86.4) -> hold
         ("2026-01-20", 90,  85),   # low=85 <= stop(86.4) -> exit here at 86.4
@@ -248,7 +285,7 @@ def test_pre_entry_days_during_confirmation_window_cannot_trigger_a_stop():
     trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0, confirm_days=3)
     assert len(trades) == 1
     t = trades[0]
-    assert t["entry_date"] == pd.Timestamp("2026-01-14")
+    assert t["entry_date"] == pd.Timestamp("2026-01-15")
     assert t["entry_price"] == 105
     assert t["exit_date"] == pd.Timestamp("2026-01-20")
     assert t["exit_price"] == pytest.approx(86.4)

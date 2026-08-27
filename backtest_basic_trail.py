@@ -18,18 +18,21 @@ TRAIL_PCT    = float(_bt.get("trail_pct",    20.0))
 CONFIRM_DAYS = int(  _bt.get("confirm_days", 0))
 
 
-def _find_stop_touch(daily_slice: pd.DataFrame, stop_price: float):
+def _find_price_touch(daily_slice: pd.DataFrame, price: float):
     """
     Scans daily bars in chronological order for the first day whose low
-    breaches stop_price. Fills at the stop price itself, not the day's
-    actual low -- same idealized-fill assumption
-    backtest_signal_sltp_sweep.py's SL/TP touch-check uses (raw OHLC can't
-    tell us the true intraday sequencing or gap depth). Returns
-    (exit_date, stop_price), or None if the slice has no touch.
+    breaches `price`. Fills at that price itself, not the day's actual low
+    -- same idealized-fill assumption backtest_signal_sltp_sweep.py's
+    SL/TP touch-check uses (raw OHLC can't tell us the true intraday
+    sequencing or gap depth). Dual-purpose: used both for the exit
+    trailing-stop touch (a sell-stop) and the entry limit-order touch (a
+    buy-limit) -- mechanically identical check, "did price trade down to
+    this level," just interpreted differently by the caller. Returns
+    (touch_date, price), or None if the slice has no touch.
     """
     for dt, day in daily_slice.iterrows():
-        if day["low"] <= stop_price:
-            return dt, stop_price
+        if day["low"] <= price:
+            return dt, price
     return None
 
 
@@ -66,16 +69,27 @@ def simulate_trades_basic_trail(
     close -- original behavior, unchanged.
 
     Entry, if confirm_days > 0 (added 2026-08-27, user request -- filter
-    out signals that immediately reverse): DEFERRED. Look confirm_days
-    TRADING days past the signal date; if that day's close is above the
-    signal candle's close, enter there (that day's date/price) -- the
-    entry_k field still records the signal week's %K, for context, even
-    though entry itself happens later. If that day's close is NOT above
-    the signal close, or fewer than confirm_days trading days remain in
-    the data, the signal is skipped entirely -- no retry, no partial
-    confirmation. Price-only check, deliberately no volume gate (2-3 days
-    is too small/noisy a sample to trust one). Only validated for small
-    confirm_days values landing within the single following calendar week.
+    out signals that immediately reverse): a two-stage confirm-then-fill
+    process, not a single check:
+      1. CONFIRM: look confirm_days TRADING days past the signal date
+         ("day N"). If day N's close is above the signal candle's close,
+         confirmation passes and day N's close becomes a LIMIT price. If
+         not (or fewer than confirm_days trading days remain in the
+         data), the signal is skipped entirely -- no retry.
+      2. FILL: a day-only limit buy order at that price, valid for the
+         SINGLE trading day immediately after day N ("day N+1") -- a
+         realistic order a real broker would actually accept, not an
+         idealized same-bar fill. If day N+1's low touches or breaches
+         the limit price, the trade fills there, AT the limit price
+         (day N's close), dated day N+1. If day N+1's low never reaches
+         it (price gapped up and stayed up), the order expires unfilled
+         and the signal is skipped -- "the trade is off" (explicit user
+         framing). No re-attempt on day N+2 or later.
+    entry_k always records the signal week's %K for context, regardless
+    of how much later the actual fill happens. Price-only check,
+    deliberately no volume gate (2-3 days is too small/noisy a sample to
+    trust one). Only validated for small confirm_days values landing
+    within the single following calendar week.
 
     Exit: the ONLY exit is a trail_pct% trailing stop off the highest
     weekly CLOSE seen since the ACTUAL entry (not the signal date) -- no
@@ -124,12 +138,22 @@ def simulate_trades_basic_trail(
                     if result is not None:
                         day_n_date, close_n = result
                         if close_n > close:
-                            in_position = True
-                            entry = {"entry_date": day_n_date, "entry_price": close_n, "entry_k": round(k, 2)}
-                            highest_close = close_n
-                            stop = close_n * (1 - trail_pct / 100)
-                            next_prev_week_end = day_n_date
-                    # else: not enough future data, or confirmation failed -- skip, no retry
+                            # Confirmed -> day N's close becomes a day-only
+                            # limit price, valid for the single next trading
+                            # day. Fill only if that day's low actually
+                            # reaches it; otherwise the order expires and
+                            # the signal is skipped, no retry.
+                            next_day = daily.loc[daily.index > day_n_date].iloc[:1]
+                            fill = _find_price_touch(next_day, close_n)
+                            if fill is not None:
+                                fill_date, fill_price = fill
+                                in_position = True
+                                entry = {"entry_date": fill_date, "entry_price": fill_price, "entry_k": round(k, 2)}
+                                highest_close = fill_price
+                                stop = fill_price * (1 - trail_pct / 100)
+                                next_prev_week_end = fill_date
+                            # else: limit never touched on day N+1 -- "the trade is off"
+                    # else: not enough future data to even confirm -- skip, no retry
                 else:
                     in_position = True
                     entry = {"entry_date": dt, "entry_price": close, "entry_k": round(k, 2)}
@@ -141,7 +165,7 @@ def simulate_trades_basic_trail(
                 if prev_week_end is not None
                 else daily.iloc[0:0]
             )
-            touch = _find_stop_touch(window, stop)
+            touch = _find_price_touch(window, stop)
             if touch is not None:
                 exit_date, exit_price = touch
                 trades.append({
