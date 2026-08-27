@@ -2,7 +2,8 @@
 # Double-click this file in Finder to run the Basic Scanner trailing-stop
 # backtest. Entry: same crossover as the Signal backtest (%K crosses above
 # 32, %K>%D). Exit: the ONLY exit is a 20% trailing stop off the highest
-# weekly close since entry -- no signal exit, no take-profit, no time limit.
+# weekly close since entry, checked against daily intraweek lows (not just
+# the weekly close) -- no signal exit, no take-profit, no time limit.
 # Ticker source: newest file in INPUT/, else the newest Basic Scanner output
 # in OUTPUT/BasicScan/.
 # macOS may ask you to allow it once in System Settings → Privacy & Security.

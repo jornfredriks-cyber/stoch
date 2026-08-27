@@ -17,14 +17,31 @@ ENTRY_LEVEL = float(_bt.get("entry_level", 32.0))
 TRAIL_PCT   = float(_bt.get("trail_pct",   20.0))
 
 
+def _find_stop_touch(daily_slice: pd.DataFrame, stop_price: float):
+    """
+    Scans daily bars in chronological order for the first day whose low
+    breaches stop_price. Fills at the stop price itself, not the day's
+    actual low -- same idealized-fill assumption
+    backtest_signal_sltp_sweep.py's SL/TP touch-check uses (raw OHLC can't
+    tell us the true intraday sequencing or gap depth). Returns
+    (exit_date, stop_price), or None if the slice has no touch.
+    """
+    for dt, day in daily_slice.iterrows():
+        if day["low"] <= stop_price:
+            return dt, stop_price
+    return None
+
+
 def simulate_trades_basic_trail(
+    daily: pd.DataFrame,
     weekly: pd.DataFrame,
     entry_level: float = ENTRY_LEVEL,
     trail_pct: float = TRAIL_PCT,
 ) -> list[dict]:
     """
-    Pure state-machine over a precomputed weekly close/k/d frame (as
-    produced by stoch_scan.compute_kd). No I/O.
+    Pure state-machine. `weekly` is a precomputed close/k/d frame (as
+    produced by stoch_scan.compute_kd); `daily` is the raw OHLC frame
+    (needs a "low" column) covering the same period. No I/O.
 
     Entry: identical to backtest_signal.simulate_trades_signal()'s buy leg
     -- %K crosses STRICTLY above entry_level (prior week %K < entry_level,
@@ -33,17 +50,28 @@ def simulate_trades_basic_trail(
 
     Exit: the ONLY exit is a trail_pct% trailing stop off the highest
     weekly CLOSE seen since entry -- no signal exit, no take-profit, no
-    time limit (per explicit user decision, 2026-08-27). Initial stop =
-    entry_price * (1 - trail_pct/100); each subsequent week the stop is
-    recalculated off the new highest close and only ever moves up. Checked
-    at each weekly close, not daily intraweek highs/lows -- a position can
-    therefore fill BELOW the stop level itself if the close gaps past it
-    (see stop_price vs exit_price in the returned dict).
+    time limit. Initial stop = entry_price * (1 - trail_pct/100).
+
+    Checked against each DAILY LOW within the week (2026-08-27 revision --
+    the original weekly-close-only check let a single bad week's close
+    land arbitrarily far below the nominal stop, and separately could MISS
+    a real intraweek touch entirely if price recovered by that Friday's
+    close). Fills at the stop price itself the moment a day's low touches
+    it, same technique as backtest_signal_sltp_sweep.py's SL/TP check.
+
+    Sequencing, to avoid look-ahead: each week's daily lows are checked
+    against the stop as it stood at the END OF THE PRIOR week -- never a
+    stop this week's own (not-yet-known-until-Friday) close would newly
+    justify raising it to. Only after a week survives with no touch does
+    its close get folded into the ratchet for the following week's check.
 
     A ticker can produce multiple sequential trades. If still in a
     position when the data ends, the trade is recorded as "open", marked-
-    to-market at the last available close. Weeks where %K or %D is NaN
-    (rolling windows not yet full) are skipped entirely.
+    to-market at the last available DAILY close (not weekly). Weeks where
+    %K or %D is NaN (rolling windows not yet full) are skipped from
+    iteration, but their daily bars are still covered by the touch-check
+    window (date-range based, not row-count based) -- no blind spot.
+    holding_days (not holding_weeks) since exits can now land mid-week.
     """
     weekly = weekly.dropna(subset=["k", "d"])
 
@@ -53,6 +81,7 @@ def simulate_trades_basic_trail(
     highest_close = None
     stop = None
     prev_k = None
+    prev_week_end = None
 
     for dt, row in weekly.iterrows():
         k, d, close = row["k"], row["d"], row["close"]
@@ -64,30 +93,39 @@ def simulate_trades_basic_trail(
                 highest_close = close
                 stop = close * (1 - trail_pct / 100)
         else:
-            highest_close = max(highest_close, close)
-            stop = max(stop, highest_close * (1 - trail_pct / 100))
-            if close <= stop:
+            window = (
+                daily.loc[(daily.index > prev_week_end) & (daily.index <= dt)]
+                if prev_week_end is not None
+                else daily.iloc[0:0]
+            )
+            touch = _find_stop_touch(window, stop)
+            if touch is not None:
+                exit_date, exit_price = touch
                 trades.append({
                     "entry_date": entry["entry_date"],
                     "entry_price": entry["entry_price"],
                     "entry_k": entry["entry_k"],
-                    "exit_date": dt,
-                    "exit_price": close,
+                    "exit_date": exit_date,
+                    "exit_price": exit_price,
                     "stop_price": round(stop, 4),
                     "status": "closed",
-                    "return_pct": round((close / entry["entry_price"] - 1) * 100, 2),
-                    "holding_weeks": weekly.index.get_loc(dt) - weekly.index.get_loc(entry["entry_date"]),
+                    "return_pct": round((exit_price / entry["entry_price"] - 1) * 100, 2),
+                    "holding_days": (pd.Timestamp(exit_date) - pd.Timestamp(entry["entry_date"])).days,
                 })
                 in_position = False
                 entry = None
                 highest_close = None
                 stop = None
+            else:
+                highest_close = max(highest_close, close)
+                stop = max(stop, highest_close * (1 - trail_pct / 100))
 
         prev_k = k
+        prev_week_end = dt
 
     if in_position:
-        last_date = weekly.index[-1]
-        last_close = weekly["close"].iloc[-1]
+        last_date = daily.index[-1]
+        last_close = float(daily["close"].iloc[-1])
         trades.append({
             "entry_date": entry["entry_date"],
             "entry_price": entry["entry_price"],
@@ -97,7 +135,7 @@ def simulate_trades_basic_trail(
             "stop_price": round(stop, 4),
             "status": "open",
             "return_pct": round((last_close / entry["entry_price"] - 1) * 100, 2),
-            "holding_weeks": weekly.index.get_loc(last_date) - weekly.index.get_loc(entry["entry_date"]),
+            "holding_days": (pd.Timestamp(last_date) - pd.Timestamp(entry["entry_date"])).days,
         })
 
     return trades
@@ -143,7 +181,8 @@ def run_backtest_basic_trail(folder: str):
     tickers = list(dict.fromkeys(tickers))
     print(f"Tickers loaded : {len(tickers)}  ({source})")
     print(f"Weekly Stoch   : {STOCH_LENGTH}/{STOCH_K_SMOOTH}/{STOCH_D_SMOOTH}"
-          f"  |  Entry: K crosses >{ENTRY_LEVEL} & K>D  |  Exit: {TRAIL_PCT:.0f}% trailing stop only\n")
+          f"  |  Entry: K crosses >{ENTRY_LEVEL} & K>D"
+          f"  |  Exit: {TRAIL_PCT:.0f}% trailing stop only, checked intraweek (daily lows)\n")
 
     yf_symbols = [t.replace(".", "-").replace("/", "-") for t in tickers]
     # auto_adjust=False: same rationale as backtest_signal.py -- this reuses
@@ -161,7 +200,7 @@ def run_backtest_basic_trail(folder: str):
                 continue
 
             kd = compute_kd(df, STOCH_LENGTH, STOCH_K_SMOOTH, STOCH_D_SMOOTH)
-            trades = simulate_trades_basic_trail(kd, entry_level=ENTRY_LEVEL, trail_pct=TRAIL_PCT)
+            trades = simulate_trades_basic_trail(df, kd, entry_level=ENTRY_LEVEL, trail_pct=TRAIL_PCT)
             for t in trades:
                 t["ticker"] = sym
             all_trades.extend(trades)
@@ -177,7 +216,7 @@ def run_backtest_basic_trail(folder: str):
     out_path = os.path.join(output_dir, out_name)
     columns = ["ticker", "entry_date", "entry_price", "entry_k",
                "exit_date", "exit_price", "stop_price",
-               "status", "return_pct", "holding_weeks"]
+               "status", "return_pct", "holding_days"]
     pd.DataFrame(all_trades, columns=columns).to_csv(out_path, index=False)
 
     closed_trades = [t for t in all_trades if t["status"] == "closed"]
@@ -203,8 +242,8 @@ def run_backtest_basic_trail(folder: str):
               f"  max: {max(loss_returns):.2f}%"
               f"  avg: {sum(loss_returns) / len(loss_returns):.2f}%")
     if closed_trades:
-        avg_hold = sum(t["holding_weeks"] for t in closed_trades) / len(closed_trades)
-        print(f"Avg hold (wk)  : {avg_hold:.1f}")
+        avg_hold = sum(t["holding_days"] for t in closed_trades) / len(closed_trades)
+        print(f"Avg hold (days): {avg_hold:.1f}")
     print(f"Saved → OUTPUT/{out_name}")
 
 
