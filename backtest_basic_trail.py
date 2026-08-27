@@ -7,18 +7,17 @@ import pandas as pd
 
 from backtest_signal import _newest_input_file
 from scan_utils import _Tee, _parse_watchlist_line, fetch_ohlc_bulk
-from stoch_scan import STOCH_D_SMOOTH, STOCH_K_SMOOTH, STOCH_LENGTH, compute_kd, compute_kd_daily
+from stoch_scan import STOCH_D_SMOOTH, STOCH_K_SMOOTH, STOCH_LENGTH, compute_kd, resample_weekly
 
 _cfg = configparser.ConfigParser()
 _cfg.read(os.path.join(os.path.dirname(os.path.abspath(__file__)), "stoch_config.ini"))
 _bt = _cfg["backtest_basic_trail"] if "backtest_basic_trail" in _cfg else {}
 
-ENTRY_LEVEL         = float(_bt.get("entry_level",         32.0))
-TRAIL_PCT           = float(_bt.get("trail_pct",           20.0))
-CONFIRM_DAYS        = int(  _bt.get("confirm_days",         0))
-DAILY_STOCH_LENGTH  = int(  _bt.get("daily_stoch_length",  14))
-DAILY_STOCH_K_SMOOTH = int( _bt.get("daily_stoch_k_smooth", 3))
-DAILY_STOCH_D_SMOOTH = int( _bt.get("daily_stoch_d_smooth", 3))
+ENTRY_LEVEL          = float(_bt.get("entry_level",           32.0))
+TRAIL_PCT            = float(_bt.get("trail_pct",             20.0))
+BREAKOUT_WINDOW_DAYS = int(  _bt.get("breakout_window_days",  0))
+BREAKOUT_PIVOT_WEEKS = int(  _bt.get("breakout_pivot_weeks",  3))
+BREAKOUT_LOOKBACK_WEEKS = int(_bt.get("breakout_lookback_weeks", 26))
 
 
 def _find_price_touch(daily_slice: pd.DataFrame, price: float):
@@ -39,33 +38,52 @@ def _find_price_touch(daily_slice: pd.DataFrame, price: float):
     return None
 
 
-def _daily_kd_at_confirm_day(daily_kd: pd.DataFrame, signal_date, confirm_days: int):
+def _last_significant_high(weekly_ohlc: pd.DataFrame, signal_date, pivot_weeks: int, lookback_weeks: int):
     """
-    Returns (day_N_date, k, d) for the confirm_days-th trading day strictly
-    after signal_date, or None if fewer than confirm_days trading days
-    remain in the data, or that day's daily %K/%D isn't available yet
-    (rolling window not full -- signal too close to the start of history).
+    Scans backward from signal_date (inclusive of weeks up to it) on the
+    WEEKLY OHLC frame for the most recent swing-high pivot: a week whose
+    high is the maximum within pivot_weeks weekly bars on BOTH sides of it
+    (the standard "local peak" definition -- needs pivot_weeks weeks of
+    confirmed lower highs before AND after it). Search is bounded to the
+    last lookback_weeks weekly bars before signal_date, so an old,
+    no-longer-relevant peak doesn't anchor the level.
+
+    Weekly, not daily, deliberately -- filters short-term noise a daily
+    scan would pick up, and keeps the level on the same timeframe as the
+    signal itself (explicit user decision, 2026-08-27).
+
+    Returns the pivot's high price (float), or None if no qualifying
+    pivot exists in range.
     """
-    future = daily_kd.loc[daily_kd.index > signal_date]
-    if len(future) < confirm_days:
+    past = weekly_ohlc.loc[weekly_ohlc.index <= signal_date]
+    if len(past) < 2 * pivot_weeks + 1:
         return None
-    k_n = future["k"].iloc[confirm_days - 1]
-    d_n = future["d"].iloc[confirm_days - 1]
-    if pd.isna(k_n) or pd.isna(d_n):
+
+    window = 2 * pivot_weeks + 1
+    rolling_max = past["high"].rolling(window, center=True).max()
+    is_pivot = past["high"] == rolling_max
+
+    cutoff = past.index[-1] - pd.Timedelta(weeks=lookback_weeks)
+    candidates = past.loc[is_pivot & (past.index >= cutoff)]
+
+    if candidates.empty:
         return None
-    return future.index[confirm_days - 1], k_n, d_n
+    return float(candidates["high"].iloc[-1])
 
 
-def _next_day_open(daily: pd.DataFrame, day_n_date):
+def _find_breakout_touch(daily_slice: pd.DataFrame, price: float):
     """
-    Returns (date, open_price) for the single trading day immediately
-    after day_n_date, or None if none exists (day_n_date is the last bar
-    in the data).
+    Mirror of _find_price_touch() for the upside: scans daily bars in
+    chronological order for the first day whose HIGH reaches or exceeds
+    `price` -- a buy-stop trigger, not a limit. Fills at that price
+    itself, not the day's actual high (same idealized-fill convention
+    used throughout this file). Returns (touch_date, price), or None if
+    the slice has no touch.
     """
-    future = daily.loc[daily.index > day_n_date]
-    if future.empty:
-        return None
-    return future.index[0], float(future["open"].iloc[0])
+    for dt, day in daily_slice.iterrows():
+        if day["high"] >= price:
+            return dt, price
+    return None
 
 
 def simulate_trades_basic_trail(
@@ -73,47 +91,48 @@ def simulate_trades_basic_trail(
     weekly: pd.DataFrame,
     entry_level: float = ENTRY_LEVEL,
     trail_pct: float = TRAIL_PCT,
-    confirm_days: int = CONFIRM_DAYS,
-    daily_kd: pd.DataFrame | None = None,
+    breakout_window_days: int = BREAKOUT_WINDOW_DAYS,
+    weekly_ohlc: pd.DataFrame | None = None,
+    pivot_weeks: int = BREAKOUT_PIVOT_WEEKS,
+    lookback_weeks: int = BREAKOUT_LOOKBACK_WEEKS,
 ) -> list[dict]:
     """
     Pure state-machine. `weekly` is a precomputed close/k/d frame (as
     produced by stoch_scan.compute_kd); `daily` is the raw OHLC frame
-    (needs "open", "close", "low" columns) covering the same period;
-    `daily_kd` is a precomputed daily close/k/d frame (as produced by
-    stoch_scan.compute_kd_daily) -- only required when confirm_days > 0.
-    No I/O.
+    (needs "open", "close", "low", "high" columns) covering the same
+    period; `weekly_ohlc` is a precomputed weekly high/low/close frame (as
+    produced by stoch_scan.resample_weekly) -- only required when
+    breakout_window_days > 0. No I/O.
 
     Signal: identical to backtest_signal.simulate_trades_signal()'s buy leg
     -- %K crosses STRICTLY above entry_level (prior week %K < entry_level,
     current week %K > entry_level) AND %K > %D on the current week.
 
-    Entry, if confirm_days == 0 (default): immediate, at the signal week's
-    close -- original behavior, unchanged.
+    Entry, if breakout_window_days == 0 (default): immediate, at the
+    signal week's close -- original behavior, unchanged.
 
-    Entry, if confirm_days > 0 (added 2026-08-27, user request -- filter
-    out signals that immediately reverse; revised same day from an earlier
-    price-close version that barely discriminated in practice, to a
-    momentum-based one that keeps the same wait length): a two-stage
-    confirm-then-fill process:
-      1. CONFIRM: look confirm_days TRADING days past the signal date
-         ("day N"). If day N's DAILY %K is above day N's DAILY %D (an
-         independent, faster oscillator from the weekly one used for the
-         signal itself -- see daily_kd), confirmation passes. If not (or
-         day N's daily %K/%D isn't available yet, or fewer than
-         confirm_days trading days remain in the data), the signal is
-         skipped entirely -- no retry.
-      2. FILL: a plain market buy at day N+1's OPEN -- the earliest
-         realistic fill after a decision made off day N's close. Always
-         fills if day N+1 exists in the data (no rejection case here,
-         unlike the earlier limit-order version -- there's no price level
-         that can fail to be touched). If day N+1 doesn't exist (signal
-         too close to the end of history), the signal is skipped.
-    entry_k always records the signal week's %K for context, regardless
-    of how much later the actual fill happens. Deliberately no volume
-    gate (2-3 days is too small/noisy a sample to trust one). Only
-    validated for small confirm_days values landing within the single
-    following calendar week.
+    Entry, if breakout_window_days > 0 (2026-08-27, third revision of an
+    entry-timing filter this project has iterated on -- a price-close
+    check, then a realistic limit-order version of it, then a daily-
+    Stochastic momentum check, all barely discriminating in live testing;
+    this is a structurally different idea, not another tweak of those):
+    a breakout-above-resistance entry.
+      1. On the signal, immediately look backward for the LAST SIGNIFICANT
+         HIGH -- a weekly swing-high pivot (see _last_significant_high())
+         within lookback_weeks before the signal. If none qualifies, the
+         signal is skipped.
+      2. That pivot's price becomes a BUY-STOP order (fills the moment
+         price trades UP THROUGH it, not a limit order for buying dips),
+         active for breakout_window_days TRADING days after the signal.
+         The first day whose daily HIGH reaches or exceeds the level
+         fills the trade there, at that price (see _find_breakout_touch()).
+      3. If the window elapses with no touch, the order expires and the
+         signal is skipped entirely -- no retry (matches the "No trade!"
+         case the user validated by hand against a real weekly chart:
+         signals that never clear their resistance and instead roll over
+         are exactly what this is meant to filter out).
+    entry_k still records the signal week's %K for context. No volume
+    gate.
 
     Exit: the ONLY exit is a trail_pct% trailing stop off the highest
     weekly CLOSE seen since the ACTUAL entry (not the signal date) -- no
@@ -157,25 +176,20 @@ def simulate_trades_basic_trail(
 
         if not in_position:
             if prev_k is not None and prev_k < entry_level and k > entry_level and k > d:
-                if confirm_days > 0:
-                    result = _daily_kd_at_confirm_day(daily_kd, dt, confirm_days)
-                    if result is not None:
-                        day_n_date, k_n, d_n = result
-                        if k_n > d_n:
-                            # Confirmed -> a plain market buy at the next
-                            # trading day's open, the earliest realistic
-                            # fill after a decision made off day N's close.
-                            fill = _next_day_open(daily, day_n_date)
-                            if fill is not None:
-                                fill_date, fill_price = fill
-                                in_position = True
-                                entry = {"entry_date": fill_date, "entry_price": fill_price, "entry_k": round(k, 2)}
-                                highest_close = fill_price
-                                stop = fill_price * (1 - trail_pct / 100)
-                                next_prev_week_end = fill_date
-                            # else: no next trading day -- skip, no retry
-                        # else: daily %K <= %D on day N -- not confirmed, skip
-                    # else: not enough future data to even reach day N, or its daily k/d isn't available -- skip
+                if breakout_window_days > 0:
+                    level = _last_significant_high(weekly_ohlc, dt, pivot_weeks, lookback_weeks)
+                    if level is not None:
+                        window_days = daily.loc[daily.index > dt].iloc[:breakout_window_days]
+                        touch = _find_breakout_touch(window_days, level)
+                        if touch is not None:
+                            fill_date, fill_price = touch
+                            in_position = True
+                            entry = {"entry_date": fill_date, "entry_price": fill_price, "entry_k": round(k, 2)}
+                            highest_close = fill_price
+                            stop = fill_price * (1 - trail_pct / 100)
+                            next_prev_week_end = fill_date
+                        # else: window elapsed with no breakout -- "No trade!", skip
+                    # else: no qualifying weekly swing-high pivot in range -- skip
                 else:
                     in_position = True
                     entry = {"entry_date": dt, "entry_price": close, "entry_k": round(k, 2)}
@@ -271,7 +285,8 @@ def run_backtest_basic_trail(folder: str):
     print(f"Tickers loaded : {len(tickers)}  ({source})")
     print(f"Weekly Stoch   : {STOCH_LENGTH}/{STOCH_K_SMOOTH}/{STOCH_D_SMOOTH}"
           f"  |  Entry: K crosses >{ENTRY_LEVEL} & K>D"
-          + (f", confirmed {CONFIRM_DAYS}d later (daily K>D), filled at next open" if CONFIRM_DAYS > 0 else ", immediate")
+          + (f", breakout above last {BREAKOUT_PIVOT_WEEKS}wk pivot high within {BREAKOUT_WINDOW_DAYS}d"
+             if BREAKOUT_WINDOW_DAYS > 0 else ", immediate")
           + f"\n{'':17s}|  Exit: {TRAIL_PCT:.0f}% trailing stop only, checked intraweek (daily lows)\n")
 
     yf_symbols = [t.replace(".", "-").replace("/", "-") for t in tickers]
@@ -290,13 +305,11 @@ def run_backtest_basic_trail(folder: str):
                 continue
 
             kd = compute_kd(df, STOCH_LENGTH, STOCH_K_SMOOTH, STOCH_D_SMOOTH)
-            kd_daily = (
-                compute_kd_daily(df, DAILY_STOCH_LENGTH, DAILY_STOCH_K_SMOOTH, DAILY_STOCH_D_SMOOTH)
-                if CONFIRM_DAYS > 0 else None
-            )
+            weekly_ohlc = resample_weekly(df) if BREAKOUT_WINDOW_DAYS > 0 else None
             trades = simulate_trades_basic_trail(
                 df, kd, entry_level=ENTRY_LEVEL, trail_pct=TRAIL_PCT,
-                confirm_days=CONFIRM_DAYS, daily_kd=kd_daily,
+                breakout_window_days=BREAKOUT_WINDOW_DAYS, weekly_ohlc=weekly_ohlc,
+                pivot_weeks=BREAKOUT_PIVOT_WEEKS, lookback_weeks=BREAKOUT_LOOKBACK_WEEKS,
             )
             for t in trades:
                 t["ticker"] = sym
