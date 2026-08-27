@@ -30,7 +30,7 @@ def test_never_enters_returns_empty_list():
         ("2026-01-16", 101, 18, 16),
     ])
     daily = _daily([])
-    trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0)
+    trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0, confirm_days=0)
     assert trades == []
 
 
@@ -54,7 +54,7 @@ def test_stop_touched_intraweek_exits_at_stop_price_not_the_close():
         ("2026-01-15", 85, 83),
         ("2026-01-16", 90, 89),
     ])
-    trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0)
+    trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0, confirm_days=0)
     assert len(trades) == 1
     t = trades[0]
     assert t["status"] == "closed"
@@ -81,7 +81,7 @@ def test_stop_ratchets_across_weeks_and_exits_intraweek_at_new_stop():
         ("2026-01-26", 140, 130), ("2026-01-27", 125, 115),  # low=115 <= stop(120) -> exit here
         ("2026-01-28", 118, 113), ("2026-01-29", 118, 114), ("2026-01-30", 118, 116),
     ])
-    trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0)
+    trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0, confirm_days=0)
     assert len(trades) == 1
     t = trades[0]
     assert t["exit_date"] == pd.Timestamp("2026-01-27")
@@ -112,7 +112,7 @@ def test_no_lookahead_a_surviving_weeks_low_cannot_trigger_next_weeks_ratcheted_
         ("2026-01-20", 130, 128), ("2026-01-21", 132, 130),
         ("2026-01-22", 134, 132), ("2026-01-23", 135, 133),
     ])
-    trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0)
+    trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0, confirm_days=0)
     assert len(trades) == 1
     t = trades[0]
     assert t["exit_date"] == pd.Timestamp("2026-01-19")
@@ -130,7 +130,7 @@ def test_open_trade_marked_at_last_daily_close_when_never_stopped_out():
         ("2026-01-12", 105, 102), ("2026-01-13", 108, 105), ("2026-01-14", 109, 106),
         ("2026-01-15", 110, 107), ("2026-01-16", 108, 106),  # last daily close = 108
     ])
-    trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0)
+    trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0, confirm_days=0)
     assert len(trades) == 1
     t = trades[0]
     assert t["status"] == "open"
@@ -158,12 +158,123 @@ def test_sequential_trades_after_an_intraweek_stop_out():
         ("2026-02-02", 85, 82), ("2026-02-03", 78, 71),  # low=71 <= stop(72) -> exit 2 here
         ("2026-02-04", 80, 77), ("2026-02-05", 82, 79), ("2026-02-06", 85, 82),
     ])
-    trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0)
+    trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0, confirm_days=0)
     assert len(trades) == 2
     assert trades[0]["entry_date"] == pd.Timestamp("2026-01-09")
     assert trades[0]["exit_date"] == pd.Timestamp("2026-01-13")
     assert trades[1]["entry_date"] == pd.Timestamp("2026-01-30")
     assert trades[1]["exit_date"] == pd.Timestamp("2026-02-03")
+
+
+def test_confirmation_passes_enters_at_day3_close_not_signal_close():
+    # Signal Friday 2026-01-09 at close=100. confirm_days=3 -> day 3 after
+    # the signal is Wed 2026-01-14. Its close (105) is above the signal
+    # close (100), so confirmation passes: entry is at day 3's date/price,
+    # NOT the signal week's.
+    weekly = _weekly([
+        ("2026-01-02", 100, 20, 25),
+        ("2026-01-09", 100, 35, 28),  # signal fires, but entry is deferred
+        ("2026-01-16", 110, 50, 40),
+    ])
+    daily = _daily([
+        ("2026-01-12", 98,  95),
+        ("2026-01-13", 102, 99),
+        ("2026-01-14", 105, 101),  # day 3: close=105 > signal close(100) -> CONFIRMED
+        ("2026-01-15", 106, 102),
+        ("2026-01-16", 108, 103),
+    ])
+    trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0, confirm_days=3)
+    assert len(trades) == 1
+    t = trades[0]
+    assert t["entry_date"] == pd.Timestamp("2026-01-14")
+    assert t["entry_price"] == 105
+    assert t["entry_k"] == 35  # still reports the signal week's %K
+
+
+def test_confirmation_fails_skips_the_signal_entirely():
+    # Same signal, but day 3's close (95) is NOT above the signal close
+    # (100) -> confirmation fails, no trade at all this cycle.
+    weekly = _weekly([
+        ("2026-01-02", 100, 20, 25),
+        ("2026-01-09", 100, 35, 28),
+        ("2026-01-16", 90,  30, 32),
+    ])
+    daily = _daily([
+        ("2026-01-12", 97, 94),
+        ("2026-01-13", 96, 93),
+        ("2026-01-14", 95, 92),  # day 3: close=95 <= signal close(100) -> NOT confirmed
+        ("2026-01-15", 93, 90),
+        ("2026-01-16", 90, 87),
+    ])
+    trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0, confirm_days=3)
+    assert trades == []
+
+
+def test_confirmation_skipped_when_insufficient_future_trading_days():
+    # Signal fires on the very last weekly bar -- only 2 daily bars exist
+    # after it, but confirm_days=3 needs a 3rd. No crash, just no trade.
+    weekly = _weekly([
+        ("2026-01-02", 100, 20, 25),
+        ("2026-01-09", 100, 35, 28),
+    ])
+    daily = _daily([
+        ("2026-01-12", 102, 99),
+        ("2026-01-13", 104, 101),
+    ])
+    trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0, confirm_days=3)
+    assert trades == []
+
+
+def test_pre_entry_days_during_confirmation_window_cannot_trigger_a_stop():
+    # Regression test: the confirmation window's own daily lows (before the
+    # position exists) must never be scanned for a stop touch, even though
+    # they're deeper than the stop that gets established once entry
+    # actually happens on day 3.
+    weekly = _weekly([
+        ("2026-01-02", 100, 20, 25),
+        ("2026-01-09", 100, 35, 28),  # signal; confirmation resolves entry on day 3
+        ("2026-01-16", 108, 50, 40),  # first full week post-entry: survives -> ratchet
+        ("2026-01-23", 92,  40, 45),  # exits intraweek at the ratcheted stop
+    ])
+    daily = _daily([
+        ("2026-01-12", 90,  70),   # pre-entry: low=70, deep, must be IGNORED (no position yet)
+        ("2026-01-13", 95,  75),   # pre-entry: low=75, must be IGNORED
+        ("2026-01-14", 105, 90),   # day 3: close=105 > 100 -> CONFIRMED, entry here, stop=84
+        ("2026-01-15", 106, 85),   # post-entry: low=85 > stop(84) -> hold
+        ("2026-01-16", 108, 90),   # post-entry: low=90 > stop(84) -> hold; week survives, ratchet to 86.4
+        ("2026-01-19", 92,  88),   # low=88 > stop(86.4) -> hold
+        ("2026-01-20", 90,  85),   # low=85 <= stop(86.4) -> exit here at 86.4
+    ])
+    trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0, confirm_days=3)
+    assert len(trades) == 1
+    t = trades[0]
+    assert t["entry_date"] == pd.Timestamp("2026-01-14")
+    assert t["entry_price"] == 105
+    assert t["exit_date"] == pd.Timestamp("2026-01-20")
+    assert t["exit_price"] == pytest.approx(86.4)
+    assert t["return_pct"] == pytest.approx(-17.71, abs=0.01)
+
+
+def test_confirm_days_zero_enters_immediately_as_before():
+    # Default/off behavior must reproduce the pre-confirmation-filter
+    # results exactly.
+    weekly = _weekly([
+        ("2026-01-02", 100, 20, 25),
+        ("2026-01-09", 100, 35, 28),
+        ("2026-01-16", 90,  40, 32),
+    ])
+    daily = _daily([
+        ("2026-01-12", 95, 95),
+        ("2026-01-13", 88, 85),
+        ("2026-01-14", 82, 78),  # low=78 <= stop(80) -> exit here at 80
+        ("2026-01-15", 85, 83),
+        ("2026-01-16", 90, 89),
+    ])
+    trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0, confirm_days=0)
+    assert len(trades) == 1
+    assert trades[0]["entry_date"] == pd.Timestamp("2026-01-09")
+    assert trades[0]["entry_price"] == 100
+    assert trades[0]["exit_date"] == pd.Timestamp("2026-01-14")
 
 
 def test_dropped_nan_week_still_has_its_daily_bars_checked():
@@ -186,7 +297,7 @@ def test_dropped_nan_week_still_has_its_daily_bars_checked():
         ("2026-01-26", 113, 111), ("2026-01-27", 114, 112), ("2026-01-28", 114, 112),
         ("2026-01-29", 115, 113), ("2026-01-30", 115, 113),
     ])
-    trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0)
+    trades = simulate_trades_basic_trail(daily, weekly, entry_level=32.0, trail_pct=20.0, confirm_days=0)
     assert len(trades) == 1
     t = trades[0]
     assert t["exit_date"] == pd.Timestamp("2026-01-21")

@@ -13,8 +13,9 @@ _cfg = configparser.ConfigParser()
 _cfg.read(os.path.join(os.path.dirname(os.path.abspath(__file__)), "stoch_config.ini"))
 _bt = _cfg["backtest_basic_trail"] if "backtest_basic_trail" in _cfg else {}
 
-ENTRY_LEVEL = float(_bt.get("entry_level", 32.0))
-TRAIL_PCT   = float(_bt.get("trail_pct",   20.0))
+ENTRY_LEVEL  = float(_bt.get("entry_level",  32.0))
+TRAIL_PCT    = float(_bt.get("trail_pct",    20.0))
+CONFIRM_DAYS = int(  _bt.get("confirm_days", 0))
 
 
 def _find_stop_touch(daily_slice: pd.DataFrame, stop_price: float):
@@ -32,25 +33,54 @@ def _find_stop_touch(daily_slice: pd.DataFrame, stop_price: float):
     return None
 
 
+def _confirmation_close(daily: pd.DataFrame, signal_date, confirm_days: int):
+    """
+    Returns (day_N_date, day_N_close) for the confirm_days-th trading day
+    strictly after signal_date, or None if fewer than confirm_days trading
+    days remain in the data (signal too close to the end of history to
+    confirm -- skipped, not an error).
+    """
+    future = daily.loc[daily.index > signal_date]
+    if len(future) < confirm_days:
+        return None
+    return future.index[confirm_days - 1], float(future["close"].iloc[confirm_days - 1])
+
+
 def simulate_trades_basic_trail(
     daily: pd.DataFrame,
     weekly: pd.DataFrame,
     entry_level: float = ENTRY_LEVEL,
     trail_pct: float = TRAIL_PCT,
+    confirm_days: int = CONFIRM_DAYS,
 ) -> list[dict]:
     """
     Pure state-machine. `weekly` is a precomputed close/k/d frame (as
     produced by stoch_scan.compute_kd); `daily` is the raw OHLC frame
-    (needs a "low" column) covering the same period. No I/O.
+    (needs "close" and "low" columns) covering the same period. No I/O.
 
-    Entry: identical to backtest_signal.simulate_trades_signal()'s buy leg
+    Signal: identical to backtest_signal.simulate_trades_signal()'s buy leg
     -- %K crosses STRICTLY above entry_level (prior week %K < entry_level,
-    current week %K > entry_level) AND %K > %D on the current week. Fill at
-    that week's close.
+    current week %K > entry_level) AND %K > %D on the current week.
+
+    Entry, if confirm_days == 0 (default): immediate, at the signal week's
+    close -- original behavior, unchanged.
+
+    Entry, if confirm_days > 0 (added 2026-08-27, user request -- filter
+    out signals that immediately reverse): DEFERRED. Look confirm_days
+    TRADING days past the signal date; if that day's close is above the
+    signal candle's close, enter there (that day's date/price) -- the
+    entry_k field still records the signal week's %K, for context, even
+    though entry itself happens later. If that day's close is NOT above
+    the signal close, or fewer than confirm_days trading days remain in
+    the data, the signal is skipped entirely -- no retry, no partial
+    confirmation. Price-only check, deliberately no volume gate (2-3 days
+    is too small/noisy a sample to trust one). Only validated for small
+    confirm_days values landing within the single following calendar week.
 
     Exit: the ONLY exit is a trail_pct% trailing stop off the highest
-    weekly CLOSE seen since entry -- no signal exit, no take-profit, no
-    time limit. Initial stop = entry_price * (1 - trail_pct/100).
+    weekly CLOSE seen since the ACTUAL entry (not the signal date) -- no
+    signal exit, no take-profit, no time limit. Initial stop =
+    entry_price * (1 - trail_pct/100).
 
     Checked against each DAILY LOW within the week (2026-08-27 revision --
     the original weekly-close-only check let a single bad week's close
@@ -85,13 +115,26 @@ def simulate_trades_basic_trail(
 
     for dt, row in weekly.iterrows():
         k, d, close = row["k"], row["d"], row["close"]
+        next_prev_week_end = dt  # default; overridden below on a confirmed deferred entry
 
         if not in_position:
             if prev_k is not None and prev_k < entry_level and k > entry_level and k > d:
-                in_position = True
-                entry = {"entry_date": dt, "entry_price": close, "entry_k": round(k, 2)}
-                highest_close = close
-                stop = close * (1 - trail_pct / 100)
+                if confirm_days > 0:
+                    result = _confirmation_close(daily, dt, confirm_days)
+                    if result is not None:
+                        day_n_date, close_n = result
+                        if close_n > close:
+                            in_position = True
+                            entry = {"entry_date": day_n_date, "entry_price": close_n, "entry_k": round(k, 2)}
+                            highest_close = close_n
+                            stop = close_n * (1 - trail_pct / 100)
+                            next_prev_week_end = day_n_date
+                    # else: not enough future data, or confirmation failed -- skip, no retry
+                else:
+                    in_position = True
+                    entry = {"entry_date": dt, "entry_price": close, "entry_k": round(k, 2)}
+                    highest_close = close
+                    stop = close * (1 - trail_pct / 100)
         else:
             window = (
                 daily.loc[(daily.index > prev_week_end) & (daily.index <= dt)]
@@ -121,7 +164,7 @@ def simulate_trades_basic_trail(
                 stop = max(stop, highest_close * (1 - trail_pct / 100))
 
         prev_k = k
-        prev_week_end = dt
+        prev_week_end = next_prev_week_end
 
     if in_position:
         last_date = daily.index[-1]
@@ -182,7 +225,8 @@ def run_backtest_basic_trail(folder: str):
     print(f"Tickers loaded : {len(tickers)}  ({source})")
     print(f"Weekly Stoch   : {STOCH_LENGTH}/{STOCH_K_SMOOTH}/{STOCH_D_SMOOTH}"
           f"  |  Entry: K crosses >{ENTRY_LEVEL} & K>D"
-          f"  |  Exit: {TRAIL_PCT:.0f}% trailing stop only, checked intraweek (daily lows)\n")
+          + (f", confirmed {CONFIRM_DAYS}d later (close>signal close)" if CONFIRM_DAYS > 0 else ", immediate")
+          + f"\n{'':17s}|  Exit: {TRAIL_PCT:.0f}% trailing stop only, checked intraweek (daily lows)\n")
 
     yf_symbols = [t.replace(".", "-").replace("/", "-") for t in tickers]
     # auto_adjust=False: same rationale as backtest_signal.py -- this reuses
@@ -200,7 +244,9 @@ def run_backtest_basic_trail(folder: str):
                 continue
 
             kd = compute_kd(df, STOCH_LENGTH, STOCH_K_SMOOTH, STOCH_D_SMOOTH)
-            trades = simulate_trades_basic_trail(df, kd, entry_level=ENTRY_LEVEL, trail_pct=TRAIL_PCT)
+            trades = simulate_trades_basic_trail(
+                df, kd, entry_level=ENTRY_LEVEL, trail_pct=TRAIL_PCT, confirm_days=CONFIRM_DAYS
+            )
             for t in trades:
                 t["ticker"] = sym
             all_trades.extend(trades)
