@@ -195,12 +195,19 @@ def simulate_trades_basic_trail(
                     entry = {"entry_date": dt, "entry_price": close, "entry_k": round(k, 2)}
                     highest_close = close
                     stop = close * (1 - trail_pct / 100)
+        elif dt <= prev_week_end:
+            # This weekly bar is entirely covered by the entry's own fill
+            # date -- the breakout can land more than one calendar week
+            # after the signal (the window is ~2 weeks), skipping past
+            # the very next weekly row. Nothing new to check yet; must
+            # NOT regress prev_week_end backward to dt, or the following
+            # week's touch-check window would wrongly include days from
+            # before the position even existed. Carry prev_week_end
+            # forward unchanged and wait for a weekly bar that's actually
+            # after it.
+            next_prev_week_end = prev_week_end
         else:
-            window = (
-                daily.loc[(daily.index > prev_week_end) & (daily.index <= dt)]
-                if prev_week_end is not None
-                else daily.iloc[0:0]
-            )
+            window = daily.loc[(daily.index > prev_week_end) & (daily.index <= dt)]
             touch = _find_price_touch(window, stop)
             if touch is not None:
                 exit_date, exit_price = touch

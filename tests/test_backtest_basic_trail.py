@@ -342,6 +342,58 @@ def test_pre_breakout_days_cannot_affect_the_subsequent_exit():
     assert t["return_pct"] == pytest.approx(-13.33, abs=0.01)
 
 
+def test_multiweek_breakout_cannot_produce_an_exit_before_its_own_entry():
+    # Regression test for a real bug found against live IREN data: when
+    # the breakout takes longer than one calendar week to trigger (the
+    # window is ~2 weeks, so this is common, not an edge case), the very
+    # next weekly row after the signal (2026-01-09) is EARLIER than the
+    # actual fill date (2026-01-15) -- it falls in the gap the breakout
+    # window spans. A day between that skipped weekly row and the real
+    # entry (2026-01-13, low=10 -- deep, deliberately) must NOT be
+    # scanned for a stop touch; only after 2026-01-15 (the real entry)
+    # should the exit touch-check window start. Before the fix, this
+    # produced a reported exit_date BEFORE its own entry_date.
+    weekly = _weekly([
+        ("2025-12-26", 100, 20, 25),
+        ("2026-01-02", 100, 35, 28),   # signal
+        ("2026-01-09", 105, 40, 30),   # skipped entirely -- covered by the later fill date
+        ("2026-01-16", 108, 45, 35),   # fill date (01-15) falls within this week
+        ("2026-01-23", 92,  40, 45),   # exits intraweek
+    ])
+    weekly_ohlc = _weekly_ohlc([
+        ("2025-11-07", 100, 90, 95), ("2025-11-14", 105, 95, 100), ("2025-11-21", 110, 100, 105),
+        ("2025-11-28", 120, 105, 115),
+        ("2025-12-05", 115, 100, 105), ("2025-12-12", 110, 95, 100), ("2025-12-19", 95, 85, 90),
+        ("2025-12-26", 90, 80, 85), ("2026-01-02", 100, 90, 95),
+    ])
+    daily = _daily([
+        ("2026-01-05", 98,  95,  98,  102),
+        ("2026-01-06", 100, 98,  99,  105),
+        ("2026-01-07", 103, 100, 100, 108),
+        ("2026-01-08", 105, 102, 103, 110),
+        ("2026-01-09", 108, 105, 105, 112),
+        ("2026-01-12", 110, 107, 108, 115),
+        ("2026-01-13", 113, 10,  110, 118),   # TRAP: low=10, after the skipped week but before the real entry -- must be IGNORED
+        ("2026-01-14", 116, 112, 113, 119),
+        ("2026-01-15", 119, 115, 116, 121),   # day 9: high=121 >= 120 -> BREAKOUT, fill at 120
+        ("2026-01-16", 108, 118, 119, 122),   # post-entry Friday: low=118 > stop(96) -> hold
+        ("2026-01-19", 106, 100, 105, 108),   # low=100 > stop(96) -> hold
+        ("2026-01-20", 95,  90,  95,  100),   # low=90 <= stop(96) -> exit here at 96
+    ])
+    trades = simulate_trades_basic_trail(
+        daily, weekly, entry_level=32.0, trail_pct=20.0,
+        breakout_window_days=10, weekly_ohlc=weekly_ohlc, pivot_weeks=3, lookback_weeks=26,
+    )
+    assert len(trades) == 1
+    t = trades[0]
+    assert t["entry_date"] == pd.Timestamp("2026-01-15")
+    assert t["entry_price"] == 120
+    assert t["exit_date"] == pd.Timestamp("2026-01-20")
+    assert t["exit_date"] > t["entry_date"]
+    assert t["exit_price"] == pytest.approx(96.0)
+    assert t["return_pct"] == pytest.approx(-20.0, abs=0.01)
+
+
 def test_breakout_window_days_zero_enters_immediately_as_before():
     # Default/off behavior must reproduce the no-breakout-filter results
     # exactly.
